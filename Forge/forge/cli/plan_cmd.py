@@ -178,6 +178,23 @@ def _generate_gemini_config(
     if not baseline_config:
         return None
     
+    # Check for session credentials first
+    from forge.core.security import has_credentials, prompt_for_credentials
+    
+    has_gemini, has_hf = has_credentials()
+    
+    if not has_gemini:
+        print_warning("Gemini API key not found in session.")
+        console.print("[dim]Run 'forge init' first, or provide credentials now:[/]")
+        console.print()
+        
+        got_gemini, got_hf = prompt_for_credentials(console, force_gemini=True, force_hf=False)
+        
+        if not got_gemini:
+            print_error("Gemini API key required for intelligent model selection.")
+            print_info("Using hardware-optimized defaults instead...")
+            return baseline_config
+    
     # Build comprehensive context for Gemini
     hardware_context = {
         "gpu_name": hardware.gpu.name if hardware.gpu else "None",
@@ -222,7 +239,7 @@ def _generate_gemini_config(
             
     except Exception as e:
         if "API key" in str(e) or "authenticate" in str(e).lower():
-            print_error("Gemini API key not configured. Run 'forge init' first.")
+            print_error("Gemini API authentication failed.")
             print_info("Using hardware-optimized defaults instead...")
         else:
             print_warning(f"Gemini unavailable: {e}. Using hardware defaults.")
