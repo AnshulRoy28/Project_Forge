@@ -51,11 +51,13 @@ from forge.cli.train_cmd import train_command, train_internal_command
 from forge.cli.inference_cmd import inference_command
 from forge.cli.docker_cmd import docker_app
 from forge.cli.export_cmd import export_app
+from forge.cli.cleanup_cmd import cleanup_command
 
 # Project Setup
 app.command(name="init", help="🔧 Initialize Forge (lightweight Docker-based setup)")(init_command)
 app.command(name="login", help="🔐 Update or verify API credentials")(login_command)
 app.command(name="status", help="📊 Display project state and health")(status_command)
+app.command(name="cleanup", help="🧹 Clear session credentials and temporary files")(cleanup_command)
 
 # Data Engineering
 app.command(name="study", help="📊 Analyze a dataset with Gemini")(study_command)

@@ -1,21 +1,27 @@
 """
 Security Sentinel for Forge.
 
-Reviews Gemini-generated scripts and manages secure credential storage.
+Reviews Gemini-generated scripts and manages secure session-based credential storage.
+API keys are stored only in memory for the current session and automatically cleared.
 """
 
 import re
 import hashlib
+import os
+import atexit
+import tempfile
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
-import keyring
+# Session-based credential storage (in-memory only)
+_session_credentials = {
+    "gemini_api_key": None,
+    "huggingface_token": None,
+}
 
-# Keyring service name
-KEYRING_SERVICE = "forge-cli"
-KEYRING_API_KEY = "gemini_api_key"
-KEYRING_HF_TOKEN = "huggingface_token"
+# Temporary file for session tracking (auto-deleted)
+_session_file = None
 
 
 @dataclass
@@ -136,16 +142,53 @@ def review_script_interactive(script_content: str, console) -> bool:
     return Confirm.ask("[yellow]Do you want to execute this script?[/]", default=False)
 
 
-# === Credential Management ===
+# === Session-Based Credential Management ===
+
+def _cleanup_session():
+    """Clean up session credentials and temporary files."""
+    global _session_credentials, _session_file
+    
+    # Clear in-memory credentials
+    _session_credentials["gemini_api_key"] = None
+    _session_credentials["huggingface_token"] = None
+    
+    # Remove temporary session file if it exists
+    if _session_file and os.path.exists(_session_file):
+        try:
+            os.unlink(_session_file)
+        except Exception:
+            pass
+    
+    # Clear environment variables
+    for key in ["GEMINI_API_KEY", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"]:
+        if key in os.environ:
+            del os.environ[key]
+
+
+def _init_session():
+    """Initialize session tracking and register cleanup."""
+    global _session_file
+    
+    if _session_file is None:
+        # Create temporary session file
+        fd, _session_file = tempfile.mkstemp(prefix="forge_session_", suffix=".tmp")
+        os.close(fd)
+        
+        # Register cleanup functions
+        atexit.register(_cleanup_session)
+
 
 def store_api_key(api_key: str) -> bool:
     """
-    Store the Gemini API key securely in the system keyring.
+    Store the Gemini API key in session memory only.
     
     Returns True on success.
     """
     try:
-        keyring.set_password(KEYRING_SERVICE, KEYRING_API_KEY, api_key)
+        _init_session()
+        _session_credentials["gemini_api_key"] = api_key
+        # Also set as environment variable for Docker containers
+        os.environ["GEMINI_API_KEY"] = api_key
         return True
     except Exception:
         return False
@@ -153,24 +196,23 @@ def store_api_key(api_key: str) -> bool:
 
 def get_api_key() -> Optional[str]:
     """
-    Retrieve the Gemini API key from the system keyring.
+    Retrieve the Gemini API key from session memory.
     
-    Returns None if not found.
+    Returns None if not found in current session.
     """
-    try:
-        return keyring.get_password(KEYRING_SERVICE, KEYRING_API_KEY)
-    except Exception:
-        return None
+    return _session_credentials.get("gemini_api_key")
 
 
 def delete_api_key() -> bool:
     """
-    Delete the stored API key.
+    Delete the API key from session memory.
     
     Returns True on success.
     """
     try:
-        keyring.delete_password(KEYRING_SERVICE, KEYRING_API_KEY)
+        _session_credentials["gemini_api_key"] = None
+        if "GEMINI_API_KEY" in os.environ:
+            del os.environ["GEMINI_API_KEY"]
         return True
     except Exception:
         return False
@@ -178,12 +220,15 @@ def delete_api_key() -> bool:
 
 def store_hf_token(token: str) -> bool:
     """
-    Store the HuggingFace token securely in the system keyring.
+    Store the HuggingFace token in session memory only.
     
     Returns True on success.
     """
     try:
-        keyring.set_password(KEYRING_SERVICE, KEYRING_HF_TOKEN, token)
+        _init_session()
+        _session_credentials["huggingface_token"] = token
+        # Also set as environment variable for Docker containers
+        os.environ["HF_TOKEN"] = token
         return True
     except Exception:
         return False
@@ -191,27 +236,115 @@ def store_hf_token(token: str) -> bool:
 
 def get_hf_token() -> Optional[str]:
     """
-    Retrieve the HuggingFace token from the system keyring.
+    Retrieve the HuggingFace token from session memory.
     
-    Returns None if not found.
+    Returns None if not found in current session.
     """
-    try:
-        return keyring.get_password(KEYRING_SERVICE, KEYRING_HF_TOKEN)
-    except Exception:
-        return None
+    return _session_credentials.get("huggingface_token")
 
 
 def delete_hf_token() -> bool:
     """
-    Delete the stored HuggingFace token.
+    Delete the HuggingFace token from session memory.
     
     Returns True on success.
     """
     try:
-        keyring.delete_password(KEYRING_SERVICE, KEYRING_HF_TOKEN)
+        _session_credentials["huggingface_token"] = None
+        for key in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"]:
+            if key in os.environ:
+                del os.environ[key]
         return True
     except Exception:
         return False
+
+
+def clear_all_credentials():
+    """Clear all session credentials immediately."""
+    _cleanup_session()
+
+
+def has_credentials() -> tuple[bool, bool]:
+    """
+    Check if credentials are available in current session.
+    
+    Returns (has_gemini_key, has_hf_token).
+    """
+    return (
+        _session_credentials.get("gemini_api_key") is not None,
+        _session_credentials.get("huggingface_token") is not None
+    )
+
+
+def prompt_for_credentials(console, force_gemini: bool = True, force_hf: bool = False) -> tuple[bool, bool]:
+    """
+    Prompt user for API credentials if not already in session.
+    
+    Args:
+        console: Rich console for output
+        force_gemini: Require Gemini API key
+        force_hf: Require HuggingFace token
+    
+    Returns (got_gemini, got_hf)
+    """
+    from rich.prompt import Prompt, Confirm
+    
+    has_gemini, has_hf = has_credentials()
+    got_gemini, got_hf = has_gemini, has_hf
+    
+    # Prompt for Gemini API key if needed
+    if not has_gemini and force_gemini:
+        console.print("\n[bold yellow]🔑 Gemini API Key Required[/]")
+        console.print("[dim]Get one at: https://aistudio.google.com/apikey[/]")
+        console.print("[dim]This will be stored only for the current session.[/]")
+        
+        while True:
+            api_key = Prompt.ask("Gemini API Key", password=True)
+            
+            if not api_key:
+                console.print("[red]API key cannot be empty.[/]")
+                continue
+            
+            if not validate_api_key_format(api_key):
+                console.print("[red]Invalid API key format.[/]")
+                continue
+            
+            if store_api_key(api_key):
+                console.print("[green]✓ Gemini API key stored for this session.[/]")
+                got_gemini = True
+                break
+            else:
+                console.print("[red]Failed to store API key.[/]")
+                return False, got_hf
+    
+    # Prompt for HuggingFace token if needed
+    if not has_hf and (force_hf or Confirm.ask("\n[yellow]Configure HuggingFace token for gated models?[/]", default=False)):
+        console.print("\n[bold yellow]🤗 HuggingFace Token[/]")
+        console.print("[dim]Get one at: https://huggingface.co/settings/tokens[/]")
+        console.print("[dim]Required for gated models like google/gemma-7b-it[/]")
+        console.print("[dim]This will be stored only for the current session.[/]")
+        
+        while True:
+            hf_token = Prompt.ask("HuggingFace Token (or press Enter to skip)", password=True)
+            
+            if not hf_token:
+                console.print("[dim]Skipping HuggingFace token - you can only use open models[/]")
+                break
+            
+            if not validate_hf_token_format(hf_token):
+                console.print("[red]Invalid HuggingFace token format.[/]")
+                console.print("[dim]Tokens should start with 'hf_' and be 37+ characters[/]")
+                continue
+            
+            if store_hf_token(hf_token):
+                console.print("[green]✓ HuggingFace token stored for this session.[/]")
+                got_hf = True
+                break
+            else:
+                console.print("[red]Failed to store HuggingFace token.[/]")
+                break
+    
+    return got_gemini, got_hf
 
 
 def validate_api_key_format(api_key: str) -> bool:

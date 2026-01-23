@@ -1,123 +1,65 @@
 """
-forge login - Update or verify API credentials.
+forge login - Update or verify session API credentials.
 """
 
-import os
-from pathlib import Path
-
 import typer
-from rich.prompt import Prompt, Confirm
 
-from forge.ui.console import console, print_success, print_error, print_info, print_warning
-from forge.core.config import ensure_forge_dir
+from forge.ui.console import console, print_success, print_info
+from forge.core.security import prompt_for_credentials, has_credentials, clear_all_credentials
 
 
 def login_command(
-    verify: bool = typer.Option(False, "--verify", "-v", help="Only verify current credentials"),
+    verify: bool = typer.Option(False, "--verify", "-v", help="Only verify current session credentials"),
+    force: bool = typer.Option(False, "--force", "-f", help="Force re-entry of credentials"),
 ):
     """
-    Update or verify your Gemini/HuggingFace API credentials.
+    Update or verify your session API credentials.
     
-    Credentials are stored in environment variables and .forge/credentials.
+    Credentials are stored only in memory for the current session.
+    They are automatically cleared when the session ends.
     """
-    console.print("\n[bold]🔐 Forge Credentials[/]\n")
-    
-    forge_dir = ensure_forge_dir()
-    creds_file = forge_dir / "credentials"
-    
-    # Load existing credentials
-    existing_gemini = os.getenv("GEMINI_API_KEY", "")
-    existing_hf = os.getenv("HF_TOKEN", "")
-    
-    if creds_file.exists():
-        with open(creds_file, 'r') as f:
-            for line in f:
-                if line.startswith("GEMINI_API_KEY="):
-                    existing_gemini = existing_gemini or line.strip().split("=", 1)[1]
-                elif line.startswith("HF_TOKEN="):
-                    existing_hf = existing_hf or line.strip().split("=", 1)[1]
+    console.print("\n[bold]🔐 Session Credentials[/]\n")
     
     if verify:
-        # Just verify
-        _verify_credentials(existing_gemini, existing_hf)
+        # Just check what's in session
+        has_gemini, has_hf = has_credentials()
+        
+        if has_gemini:
+            print_success("Gemini API key: Available in session ✓")
+        else:
+            print_info("Gemini API key: Not configured for this session")
+        
+        if has_hf:
+            print_success("HuggingFace token: Available in session ✓")
+        else:
+            print_info("HuggingFace token: Not configured for this session")
+        
+        console.print()
+        console.print("[dim]Note: Session credentials are cleared when the terminal closes.[/]")
         return
     
-    # Update credentials
-    console.print("[dim]Press Enter to keep existing value[/]\n")
+    # Clear existing if force
+    if force:
+        clear_all_credentials()
+        console.print("[yellow]Cleared existing session credentials.[/]")
+        console.print()
     
-    # Gemini API Key
-    if existing_gemini:
-        masked = existing_gemini[:8] + "..." + existing_gemini[-4:]
-        console.print(f"Current Gemini API Key: [cyan]{masked}[/]")
+    # Prompt for new credentials
+    console.print("[bold yellow]🔑 Configure Session Credentials[/]")
+    console.print("[dim]These will be stored only in memory for the current session.[/]")
+    console.print()
     
-    new_gemini = Prompt.ask(
-        "Gemini API Key",
-        default="",
-        password=True,
+    got_gemini, got_hf = prompt_for_credentials(
+        console, 
+        force_gemini=True,  # Always require Gemini
+        force_hf=False      # HuggingFace is optional
     )
-    gemini_key = new_gemini if new_gemini else existing_gemini
-    
-    # HuggingFace Token (optional)
-    if existing_hf:
-        masked = existing_hf[:8] + "..." + existing_hf[-4:]
-        console.print(f"Current HuggingFace Token: [cyan]{masked}[/]")
-    
-    new_hf = Prompt.ask(
-        "HuggingFace Token (for gated models)",
-        default="",
-        password=True,
-    )
-    hf_token = new_hf if new_hf else existing_hf
-    
-    # Save credentials
-    with open(creds_file, 'w') as f:
-        if gemini_key:
-            f.write(f"GEMINI_API_KEY={gemini_key}\n")
-        if hf_token:
-            f.write(f"HF_TOKEN={hf_token}\n")
     
     console.print()
-    print_success(f"Credentials saved to {creds_file}")
     
-    # Verify
-    _verify_credentials(gemini_key, hf_token)
-
-
-def _verify_credentials(gemini_key: str, hf_token: str):
-    """Verify that credentials work."""
-    console.print("\n[bold]Verifying credentials...[/]\n")
-    
-    # Verify Gemini
-    if gemini_key:
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel("gemini-2.0-flash")
-            response = model.generate_content("Say OK")
-            print_success("Gemini API: Connected ✓")
-        except Exception as e:
-            print_error(f"Gemini API: Failed - {e}")
+    if got_gemini:
+        print_success("Session credentials configured!")
     else:
-        print_warning("Gemini API: Not configured")
+        print_info("No credentials configured.")
     
-    # Verify HuggingFace
-    if hf_token:
-        try:
-            import requests
-            headers = {"Authorization": f"Bearer {hf_token}"}
-            response = requests.get(
-                "https://huggingface.co/api/whoami",
-                headers=headers,
-                timeout=10,
-            )
-            if response.ok:
-                username = response.json().get("name", "Unknown")
-                print_success(f"HuggingFace: Logged in as {username} ✓")
-            else:
-                print_error("HuggingFace: Invalid token")
-        except Exception as e:
-            print_warning(f"HuggingFace: Could not verify - {e}")
-    else:
-        print_info("HuggingFace: Not configured (optional)")
-    
-    console.print()
+    console.print("[dim]Credentials will be automatically cleared when this session ends.[/]")

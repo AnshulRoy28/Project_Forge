@@ -1,7 +1,7 @@
 """
-forge init - Initialize Forge environment and configure API key.
+forge init - Initialize Forge environment and configure session credentials.
 
-Lightweight initialization - Docker containers handle all heavy ML dependencies.
+Session-based security - API keys are stored only in memory for the current session.
 """
 
 import time
@@ -15,8 +15,7 @@ from forge.ui.panels import create_hardware_panel, display_panel
 from forge.ui.progress import spinner
 from forge.core.config import ensure_forge_dir
 from forge.core.security import (
-    store_api_key, get_api_key, validate_api_key_format,
-    store_hf_token, get_hf_token, validate_hf_token_format
+    prompt_for_credentials, clear_all_credentials, has_credentials
 )
 
 
@@ -28,18 +27,26 @@ def init_command(
     
     This command:
     - Scans your hardware (GPU, VRAM, RAM) 
-    - Configures and securely stores your Gemini API key
-    - Configures and securely stores your HuggingFace token (for gated models)
+    - Prompts for session-based API credentials (Gemini + HuggingFace)
     - Creates Forge config directory
+    
+    Security: API keys are stored only in memory for the current session.
+    They are automatically cleared when the session ends.
     
     Note: All ML dependencies (PyTorch, CUDA) are handled by Docker containers.
     """
     print_banner()
     console.print()
     console.print("[bold green]🐳 Docker-based setup - no heavy dependencies needed![/]")
+    console.print("[bold yellow]🔒 Session-based security - credentials cleared automatically![/]")
     console.print("[dim]All ML libraries (PyTorch, CUDA) run inside optimized containers.[/]")
-    console.print("[dim]Securely stores Gemini API key + HuggingFace token for gated models.[/]")
+    console.print("[dim]API keys stored only in memory for current session.[/]")
     console.print()
+    
+    # Clear any existing credentials if force
+    if force:
+        clear_all_credentials()
+        console.print("[yellow]Cleared existing session credentials.[/]")
     
     # Run lightweight initialization
     _run_init(force)
@@ -83,76 +90,46 @@ def _run_init(force: bool):
     
     console.print()
     
-    # Step 2: Check/Configure API Keys
-    print_step(2, 4, "Configuring API credentials...")
+    # Step 2: Session Credentials
+    print_step(2, 3, "Configuring session credentials...")
     
-    # Gemini API Key
-    console.print("[bold]🧠 Gemini API Key[/]")
-    existing_key = get_api_key()
+    # Check if credentials already exist in session
+    has_gemini, has_hf = has_credentials()
     
-    if existing_key and not force:
-        print_success("Gemini API key already configured.")
-        masked_key = existing_key[:8] + "..." + existing_key[-4:]
-        console.print(f"  [dim]Key: {masked_key}[/]")
-        
-        if not Confirm.ask("\n[yellow]Update the Gemini API key?[/]", default=False):
-            api_key = existing_key
-        else:
-            api_key = _prompt_for_gemini_api_key()
+    if has_gemini and has_hf and not force:
+        console.print("[green]✓ Session credentials already configured.[/]")
     else:
-        api_key = _prompt_for_gemini_api_key()
+        # Prompt for credentials
+        got_gemini, got_hf = prompt_for_credentials(
+            console, 
+            force_gemini=True,  # Always require Gemini
+            force_hf=False      # HuggingFace is optional
+        )
+        
+        if not got_gemini:
+            print_error("Gemini API key is required for Forge to function.")
+            raise typer.Exit(1)
     
     console.print()
     
-    # HuggingFace Token
-    console.print("[bold]🤗 HuggingFace Token[/]")
-    existing_token = get_hf_token()
-    
-    if existing_token and not force:
-        print_success("HuggingFace token already configured.")
-        masked_token = existing_token[:8] + "..." + existing_token[-4:]
-        console.print(f"  [dim]Token: {masked_token}[/]")
-        
-        if not Confirm.ask("\n[yellow]Update the HuggingFace token?[/]", default=False):
-            hf_token = existing_token
-        else:
-            hf_token = _prompt_for_hf_token()
-    else:
-        hf_token = _prompt_for_hf_token()
-    
-    console.print()
-    
-    # Step 3: Create .forge directory and validate
-    print_step(3, 4, "Finalizing setup...")
+    # Step 3: Create .forge directory
+    print_step(3, 3, "Finalizing setup...")
     
     forge_dir = ensure_forge_dir()
     (forge_dir / "cache").mkdir(exist_ok=True)
     print_success(f"Config directory: {forge_dir}")
     
-    # Quick API validation
-    print_step(4, 4, "Testing connections...")
-    
-    if api_key:
-        try:
-            with spinner("Testing Gemini connection..."):
-                _validate_gemini_connection(api_key)
-            print_success("Gemini API connected!")
-        except Exception as e:
-            print_warning(f"Gemini API test failed: {e}")
-    
-    if hf_token:
-        try:
-            with spinner("Testing HuggingFace connection..."):
-                _validate_hf_connection(hf_token)
-            print_success("HuggingFace authenticated!")
-        except Exception as e:
-            print_warning(f"HuggingFace test failed: {e}")
-            console.print("[dim]  This is optional - you can still use open models[/]")
-    
     # Summary
     elapsed = time.time() - start_time
     console.print()
     console.print(f"[bold green]✨ Forge initialized in {elapsed:.1f}s[/]")
+    console.print()
+    
+    # Security reminder
+    console.print("[bold yellow]🔒 Security Notice:[/]")
+    console.print("  • API keys stored only in memory for this session")
+    console.print("  • Credentials automatically cleared when session ends")
+    console.print("  • No persistent storage of sensitive data")
     console.print()
     
     # Show recommendations
@@ -168,7 +145,7 @@ def _run_init(force: bool):
     console.print("  1. Build Docker container: [cyan]forge docker build[/]")
     console.print("  2. Generate training plan: [cyan]forge plan \"your goal\"[/]")
     console.print("  3. Prepare your dataset: [cyan]forge prepare ./data/your_data.csv[/]")
-    console.print("  4. Start training: [cyan]forge train[/] (authentication handled automatically)")
+    console.print("  4. Start training: [cyan]forge train[/] (will use session credentials)")
     console.print()
 
 
@@ -186,98 +163,3 @@ def _get_gpu_architecture(gpu_name: str) -> str:
         return "hopper"
     else:
         return "base"
-
-
-def _prompt_for_gemini_api_key() -> str:
-    """Prompt for and store Gemini API key."""
-    console.print()
-    console.print("[bold]Enter your Gemini API key[/]")
-    console.print("[dim]Get one at: https://aistudio.google.com/apikey[/]")
-    console.print()
-    
-    while True:
-        api_key = Prompt.ask("Gemini API Key", password=True)
-        
-        if not api_key:
-            print_error("API key cannot be empty.")
-            continue
-        
-        if not validate_api_key_format(api_key):
-            print_error("Invalid API key format.")
-            continue
-        
-        if store_api_key(api_key):
-            print_success("Gemini API key stored securely.")
-            return api_key
-        else:
-            print_error("Failed to store API key.")
-            raise typer.Exit(1)
-
-
-def _prompt_for_hf_token() -> str:
-    """Prompt for and store HuggingFace token."""
-    console.print()
-    console.print("[bold]Enter your HuggingFace token[/]")
-    console.print("[dim]Get one at: https://huggingface.co/settings/tokens[/]")
-    console.print("[dim]Required for gated models like google/gemma-7b-it[/]")
-    console.print()
-    
-    # Allow skipping HuggingFace token
-    if not Confirm.ask("[yellow]Do you want to configure HuggingFace authentication?[/]", default=True):
-        console.print("[dim]Skipping HuggingFace token - you can only use open models[/]")
-        return ""
-    
-    while True:
-        hf_token = Prompt.ask("HuggingFace Token", password=True)
-        
-        if not hf_token:
-            if Confirm.ask("[yellow]Skip HuggingFace token?[/]", default=False):
-                console.print("[dim]Skipping HuggingFace token - you can only use open models[/]")
-                return ""
-            continue
-        
-        if not validate_hf_token_format(hf_token):
-            print_error("Invalid HuggingFace token format.")
-            console.print("[dim]Tokens should start with 'hf_' and be 37+ characters[/]")
-            continue
-        
-        if store_hf_token(hf_token):
-            print_success("HuggingFace token stored securely.")
-            return hf_token
-        else:
-            print_error("Failed to store HuggingFace token.")
-            raise typer.Exit(1)
-
-
-def _validate_gemini_connection(api_key: str) -> None:
-    """Test Gemini API connection."""
-    from google import genai
-    
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents="Say 'ready' in one word.",
-    )
-    
-    if not response.text:
-        raise ValueError("Empty response")
-
-
-def _validate_hf_connection(token: str) -> None:
-    """Test HuggingFace API connection."""
-    try:
-        from huggingface_hub import HfApi
-        
-        api = HfApi(token=token)
-        # Try to get user info - this will fail if token is invalid
-        user_info = api.whoami()
-        
-        if not user_info:
-            raise ValueError("Invalid token")
-            
-    except ImportError:
-        # huggingface_hub not installed, skip validation
-        console.print("[dim]  huggingface_hub not installed - skipping validation[/]")
-        return
-    except Exception as e:
-        raise ValueError(f"Authentication failed: {e}")

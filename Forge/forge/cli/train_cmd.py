@@ -68,8 +68,26 @@ def train_command(
     Start training via Docker container with GPU passthrough.
     
     All training runs inside Docker containers optimized for your GPU architecture.
+    Requires session credentials (use 'forge init' first).
     """
-    # Check Docker availability first
+    # Check for session credentials first
+    from forge.core.security import has_credentials, prompt_for_credentials
+    
+    has_gemini, has_hf = has_credentials()
+    
+    if not has_gemini:
+        console.print("[bold yellow]🔑 Session credentials required[/]")
+        console.print("[dim]Run 'forge init' first, or provide credentials now:[/]")
+        console.print()
+        
+        got_gemini, got_hf = prompt_for_credentials(console, force_gemini=True, force_hf=False)
+        
+        if not got_gemini:
+            print_error("Gemini API key is required for training")
+            console.print("[dim]Run: forge init[/]")
+            raise typer.Exit(1)
+    
+    # Check Docker availability
     if not _check_docker():
         print_error("Docker is required for training")
         console.print("\n[bold]To install Docker:[/]")
@@ -237,7 +255,7 @@ def _check_hf_authentication(model_name: str) -> bool:
     if not ("google/" in model_name or "meta-llama/" in model_name):
         return True  # No auth needed for open models
     
-    # First check if we have a stored token
+    # Check session credentials first
     from forge.core.security import get_hf_token
     stored_token = get_hf_token()
     
@@ -283,16 +301,16 @@ def _convert_v2_to_v1_config(config_v2):
         print_warning("HuggingFace authentication not found for gated model")
         console.print()
         console.print("[bold]Options:[/]")
-        console.print("1. Set up authentication: [cyan]forge init --force[/]")
+        console.print("1. Provide HuggingFace token for this session")
         console.print("2. Or use an open model: [cyan]forge plan \"your goal\" --model unsloth/gemma-2-2b-it-bnb-4bit[/]")
         console.print()
         
-        # Ask user what to do instead of failing
-        from rich.prompt import Confirm
-        if Confirm.ask("[yellow]Continue with current model (may fail during training)?[/]", default=False):
-            print_info("Continuing with gated model - training may fail if authentication is missing")
-        else:
-            print_info("Please set up authentication or use an open model")
+        # Prompt for HuggingFace token
+        from forge.core.security import prompt_for_credentials
+        got_gemini, got_hf = prompt_for_credentials(console, force_gemini=False, force_hf=True)
+        
+        if not got_hf:
+            print_info("Please provide HuggingFace token or use an open model")
             raise typer.Exit(1)
     
     batch_size = config_v2.hardware.recommended_batch_size
@@ -409,20 +427,17 @@ def _run_docker_training(config: ForgeConfig, resume: bool, dry_run: bool) -> Tu
             "-v", f"{temp_config_path.resolve()}:/app/forge.yaml:ro",  # Mount temp config as forge.yaml
         ]
         
-        # Pass GEMINI_API_KEY if set
-        if "GEMINI_API_KEY" in os.environ:
-            cmd.extend(["-e", f"GEMINI_API_KEY={os.environ['GEMINI_API_KEY']}"])
+        # Pass GEMINI_API_KEY from session
+        from forge.core.security import get_api_key
+        session_api_key = get_api_key()
+        if session_api_key:
+            cmd.extend(["-e", f"GEMINI_API_KEY={session_api_key}"])
         
-        # Pass HuggingFace token from secure storage or environment
-        hf_token = None
-        try:
-            from forge.core.security import get_hf_token
-            hf_token = get_hf_token()
-        except Exception:
-            pass
-        
-        if hf_token:
-            cmd.extend(["-e", f"HF_TOKEN={hf_token}"])
+        # Pass HuggingFace token from session
+        from forge.core.security import get_hf_token
+        session_hf_token = get_hf_token()
+        if session_hf_token:
+            cmd.extend(["-e", f"HF_TOKEN={session_hf_token}"])
         elif "HF_TOKEN" in os.environ:
             cmd.extend(["-e", f"HF_TOKEN={os.environ['HF_TOKEN']}"])
         elif "HUGGING_FACE_HUB_TOKEN" in os.environ:
