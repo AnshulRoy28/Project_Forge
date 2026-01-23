@@ -1,0 +1,34 @@
+# Virtual environments
+.forge-venv/
+.forge-sandbox/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Data and outputs (mount these instead)
+data/
+output/
+checkpoints/
+*.jsonl
+*.csv
+*.json
+
+# Temp files
+*.log
+*.tmp
+.DS_Store
+
+# Test artifacts
+tests/
+*.egg-info/
+dist/
+build/
