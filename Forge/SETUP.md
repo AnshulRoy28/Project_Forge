@@ -75,10 +75,25 @@ Forge/
 - `forge train`: Starts Docker-based training with real-time progress
 - `forge cleanup`: Clears session credentials and temporary files
 
+## Container Management (Speed Optimization)
+
+Forge uses persistent Docker containers with model caching for faster training:
+
+- `forge container status`: Check persistent container status
+- `forge container cache`: Pre-cache model in container (speeds up future runs)
+- `forge container cleanup`: Remove persistent containers
+- `forge container logs`: View container logs
+
+### How Container Caching Works:
+1. **First Training Run**: Creates persistent container and caches model (~5 minutes)
+2. **Subsequent Runs**: Reuses cached model (loads in ~10-20 seconds instead of 2-5 minutes)
+3. **Resume Training**: Uses same container with model already in memory (instant loading)
+
 ## Security Benefits
 
 ✅ **No Keyring Dependencies**: Removed system keyring storage  
 ✅ **Session Isolation**: Each terminal session is independent  
 ✅ **Automatic Cleanup**: Credentials cleared on session end  
 ✅ **Zero Persistence**: No sensitive data stored on disk  
-✅ **Fresh Authentication**: Always requires explicit credential entry
+✅ **Fresh Authentication**: Always requires explicit credential entry  
+✅ **Container Isolation**: Models cached in isolated Docker containers

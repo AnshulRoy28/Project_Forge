@@ -9,6 +9,7 @@ import sys
 import re
 import os
 import time
+import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -397,79 +398,64 @@ def _run_with_healing(
 
 
 def _run_docker_training(config: ForgeConfig, resume: bool, dry_run: bool) -> Tuple[bool, str]:
-    """Execute training in Docker container."""
+    """Execute training in persistent Docker container with model caching."""
     
-    # Detect GPU architecture
-    arch = _detect_gpu_architecture()
-    image = f"forge:{arch}"
+    # Initialize container manager
+    from forge.core.container_manager import ContainerManager
+    container_mgr = ContainerManager(config)
     
-    # Check if image exists, build if not
-    if not _check_docker_image(arch):
-        print_warning(f"Docker image {image} not found. Building...")
-        if not _build_docker_image(arch):
-            return False, "Failed to build Docker image"
+    # Start or reuse persistent container
+    container_id = container_mgr.start_persistent_container()
     
-    console.print(f"[bold]🐳 Running in Docker container ({arch})[/]\n")
+    if not container_id:
+        return False, "Failed to start persistent container"
     
-    # Create temporary old-format config for Docker
+    # Cache model in container if not already cached
+    if not config.container.model_cached:
+        console.print(f"[bold]🚀 First-time setup: Caching model in container[/]")
+        console.print(f"[dim]This will make future training sessions much faster![/]")
+        console.print()
+        
+        if container_mgr.cache_model_in_container():
+            # Save updated config with cached model info
+            config.save(Path("forge.yaml"))
+        else:
+            print_warning("Model caching failed, but training will continue")
+    else:
+        print_success(f"Using cached model from container: {container_id[:12]}")
+    
+    console.print(f"[bold]🐳 Training in persistent container ({config.hardware.gpu_arch.value})[/]")
+    console.print(f"[dim]Container: {container_id[:12]} | Model cached: {config.container.model_cached}[/]")
+    console.print()
+    
+    # Create temporary old-format config for training
     temp_config_path = Path("./forge_temp.yaml")
     try:
-        save_config(config, temp_config_path)
+        from forge.core.config import save_config
+        old_config = _convert_v2_to_v1_config(config)
+        save_config(old_config, temp_config_path)
         
-        # Build docker run command
-        cmd = [
-            "docker", "run",
-            "--gpus", "all",
-            "--rm",
-            "-v", f"{Path('./data').resolve()}:/data",
-            "-v", f"{Path('./output').resolve()}:/output",
-            "-v", f"{Path('./checkpoints').resolve()}:/checkpoints",
-            "-v", f"{temp_config_path.resolve()}:/app/forge.yaml:ro",  # Mount temp config as forge.yaml
+        # Copy config to container
+        copy_cmd = [
+            "docker", "cp", 
+            str(temp_config_path.resolve()),
+            f"{container_id}:/app/forge.yaml"
         ]
         
-        # Pass GEMINI_API_KEY from session
-        from forge.core.security import get_api_key
-        session_api_key = get_api_key()
-        if session_api_key:
-            cmd.extend(["-e", f"GEMINI_API_KEY={session_api_key}"])
-        
-        # Pass HuggingFace token from session
-        from forge.core.security import get_hf_token
-        session_hf_token = get_hf_token()
-        if session_hf_token:
-            cmd.extend(["-e", f"HF_TOKEN={session_hf_token}"])
-        elif "HF_TOKEN" in os.environ:
-            cmd.extend(["-e", f"HF_TOKEN={os.environ['HF_TOKEN']}"])
-        elif "HUGGING_FACE_HUB_TOKEN" in os.environ:
-            cmd.extend(["-e", f"HF_TOKEN={os.environ['HUGGING_FACE_HUB_TOKEN']}"])
-        
-        cmd.append(image)
+        subprocess.run(copy_cmd, check=True, timeout=30)
         
         # Build forge command inside container
-        # Use train-internal (hidden command that runs actual training inside Docker)
-        forge_cmd = ["train-internal"]
+        forge_cmd = ["forge", "train-internal"]
         if resume:
             forge_cmd.append("--resume")
         if dry_run:
             forge_cmd.append("--dry-run")
         
-        cmd.extend(forge_cmd)
-        
-        console.print(f"[dim]$ {' '.join(cmd[:8])}... {' '.join(forge_cmd)}[/]\n")
-        
-        # Run with real-time output streaming and timeout
+        # Execute training in persistent container
         error_output = []
         
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",  # Force UTF-8 encoding
-                errors="replace",  # Replace invalid characters instead of crashing
-                bufsize=1
-            )
+            process = container_mgr.execute_in_container(forge_cmd)
             
             # Add timeout and heartbeat detection
             last_output_time = time.time()
@@ -507,6 +493,9 @@ def _run_docker_training(config: ForgeConfig, resume: bool, dry_run: bool) -> Tu
             process.wait()
             
             if process.returncode == 0:
+                # Update container last used time
+                config.container.last_used = datetime.datetime.now().isoformat()
+                config.save(Path("forge.yaml"))
                 return True, ""
             else:
                 return False, "\n".join(error_output)

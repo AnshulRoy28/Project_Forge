@@ -52,6 +52,7 @@ from forge.cli.inference_cmd import inference_command
 from forge.cli.docker_cmd import docker_app
 from forge.cli.export_cmd import export_app
 from forge.cli.cleanup_cmd import cleanup_command
+from forge.cli.container_cmd import app as container_app
 
 # Project Setup
 app.command(name="init", help="🔧 Initialize Forge (lightweight Docker-based setup)")(init_command)
@@ -75,6 +76,7 @@ app.command(name="inference", help="💬 Run inference on trained model")(infere
 
 # Docker & Export
 app.add_typer(docker_app, name="docker", help="🐳 Docker container management")
+app.add_typer(container_app, name="container", help="📦 Persistent container management")
 app.add_typer(export_app, name="export", help="📦 Export models to various formats")
 
 

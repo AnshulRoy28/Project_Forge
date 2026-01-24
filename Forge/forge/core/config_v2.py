@@ -105,14 +105,30 @@ class PreprocessingConfig:
 
 
 @dataclass
+class ContainerConfig:
+    """Configuration for persistent Docker container management."""
+    container_id: Optional[str] = None
+    container_name: Optional[str] = None
+    model_cached: bool = False
+    last_used: Optional[str] = None
+    gpu_arch: Optional[str] = None
+
+
+@dataclass
 class ForgeConfig:
     """Main configuration class combining all aspects of Forge setup."""
     model: ModelConfig
     hardware: HardwareConfig
     preprocessing: PreprocessingConfig
+    container: ContainerConfig = None
     version: str = "2.0"
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    
+    def __post_init__(self):
+        """Initialize container config if not provided."""
+        if self.container is None:
+            self.container = ContainerConfig()
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ForgeConfig':
@@ -120,11 +136,19 @@ class ForgeConfig:
         model_data = data.get('model', {})
         hardware_data = data.get('hardware', {})
         preprocessing_data = data.get('preprocessing', {})
+        container_data = data.get('container', {})
         
         return cls(
             model=ModelConfig(**model_data),
             hardware=HardwareConfig(**hardware_data),
             preprocessing=PreprocessingConfig(**preprocessing_data),
+            container=ContainerConfig(
+                container_id=container_data.get('container_id'),
+                container_name=container_data.get('container_name'),
+                model_cached=container_data.get('model_cached', False),
+                last_used=container_data.get('last_used'),
+                gpu_arch=container_data.get('gpu_arch'),
+            ),
             version=data.get('version', '2.0'),
             created_at=data.get('created_at'),
             updated_at=data.get('updated_at')
@@ -165,6 +189,13 @@ class ForgeConfig:
                 'max_text_length': self.preprocessing.max_text_length,
                 'stratify_column': self.preprocessing.stratify_column,
                 'random_seed': self.preprocessing.random_seed,
+            },
+            'container': {
+                'container_id': self.container.container_id,
+                'container_name': self.container.container_name,
+                'model_cached': self.container.model_cached,
+                'last_used': self.container.last_used,
+                'gpu_arch': self.container.gpu_arch,
             }
         }
     
