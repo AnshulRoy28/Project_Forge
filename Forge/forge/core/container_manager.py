@@ -143,6 +143,145 @@ class ContainerManager:
                     console.print("✓ Reused running container")
                     return existing_id
             
+            # Create persistent HuggingFace cache directory
+            hf_cache_dir = Path.home() / ".cache" / "huggingface"
+            hf_cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Build docker run command for persistent container
+            cmd = [
+                "docker", "run",
+                "--name", self.container_name,
+                "--gpus", "all",
+                "--detach",  # Run in background
+                "--interactive",  # Keep stdin open
+                "--tty",  # Allocate pseudo-TTY
+                "-v", f"{Path('./data').resolve()}:/data",
+                "-v", f"{Path('./output').resolve()}:/output",
+                "-v", f"{Path('./checkpoints').resolve()}:/checkpoints",
+                "-v", f"{hf_cache_dir}:/root/.cache/huggingface",  # Persistent HF cache
+            ]
+            
+            # Mount forge source code for training
+            forge_package_dir = Path(__file__).parent.parent.parent.resolve()
+            cmd.extend(["-v", f"{forge_package_dir}:/app/forge_src"])
+            cmd.extend(["-e", "PYTHONPATH=/app/forge_src"])
+            cmd.extend(["-e", "HF_HOME=/root/.cache/huggingface"])
+            
+            # Pass session credentials
+            from forge.core.security import get_api_key, get_hf_token
+            
+            session_api_key = get_api_key()
+            if session_api_key:
+                cmd.extend(["-e", f"GEMINI_API_KEY={session_api_key}"])
+            
+            session_hf_token = get_hf_token()
+            if session_hf_token:
+                cmd.extend(["-e", f"HF_TOKEN={session_hf_token}"])
+            
+            # Set working directory and keep container alive
+            cmd.extend(["-w", "/app"])
+            cmd.extend([self.image_name, "tail", "-f", "/dev/null"])  # Keep container alive
+            
+            console.print(f"[dim]Creating container: {self.container_name}[/]")
+            console.print(f"[dim]HuggingFace cache: {hf_cache_dir}[/]")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                container_id = result.stdout.strip()
+                
+                # Wait a moment for container to fully start
+                time.sleep(3)
+                
+                # Verify container is actually running
+                status = self.get_container_status(container_id)
+                if status != "running":
+                    # Container failed to start - get logs for debugging
+                    try:
+                        logs_result = subprocess.run(
+                            ["docker", "logs", container_id],
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+                        print_error(f"Container failed to start. Status: {status}")
+                        if logs_result.stdout:
+                            console.print(f"[dim]Container logs:[/]")
+                            console.print(f"[dim]{logs_result.stdout}[/]")
+                        if logs_result.stderr:
+                            console.print(f"[dim]Container errors:[/]")
+                            console.print(f"[dim]{logs_result.stderr}[/]")
+                    except Exception:
+                        pass
+                    
+                    # Clean up failed container
+                    try:
+                        subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, timeout=10)
+                    except Exception:
+                        pass
+                    
+                    return None
+                
+                # Update config with new container info
+                self.config.container.container_id = container_id
+                self.config.container.container_name = self.container_name
+                self.config.container.gpu_arch = self.config.hardware.gpu_arch.value
+                self.config.container.last_used = datetime.datetime.now().isoformat()
+                self.config.container.model_cached = False  # Will be set to True after first model load
+                
+                print_success(f"Created persistent container with model server: {container_id[:12]}")
+                
+                # Wait a bit more for model server to be ready
+                time.sleep(2)
+                
+                return container_id
+            
+            else:
+                print_error(f"Failed to create container: {result.stderr}")
+                return None
+                
+        except Exception as e:
+            print_error(f"Error creating container: {e}")
+            return None
+        """Create a new persistent container."""
+        try:
+            # Check if container with this name already exists
+            check_cmd = ["docker", "ps", "-a", "--filter", f"name={self.container_name}", "--format", "{{.ID}}"]
+            check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=10)
+            
+            if check_result.returncode == 0 and check_result.stdout.strip():
+                # Container exists, try to use it
+                existing_id = check_result.stdout.strip()
+                console.print(f"[dim]Found existing container: {existing_id}[/]")
+                
+                # Update config with existing container
+                self.config.container.container_id = existing_id
+                self.config.container.container_name = self.container_name
+                
+                # Try to start it if not running
+                status = self.get_container_status()
+                if status != "running":
+                    if self._restart_container():
+                        console.print("✓ Reused existing container")
+                        return existing_id
+                    else:
+                        # Container can't be restarted - remove it and create new one
+                        console.print("[dim]Removing stuck container and creating new one...[/]")
+                        try:
+                            subprocess.run(
+                                ["docker", "rm", "-f", existing_id],
+                                capture_output=True,
+                                timeout=30
+                            )
+                            # Clear the container config
+                            self.config.container.container_id = None
+                            self.config.container.model_cached = False
+                        except Exception as e:
+                            print_warning(f"Failed to remove container: {e}")
+                else:
+                    console.print("✓ Reused running container")
+                    return existing_id
+            
             # Build docker run command for persistent container
             cmd = [
                 "docker", "run",
@@ -156,6 +295,11 @@ class ContainerManager:
                 "-v", f"{Path('./checkpoints').resolve()}:/checkpoints",
             ]
             
+            # Mount forge source code for training
+            forge_package_dir = Path(__file__).parent.parent.parent.resolve()
+            cmd.extend(["-v", f"{forge_package_dir}:/app/forge_src"])
+            cmd.extend(["-e", "PYTHONPATH=/app/forge_src"])
+            
             # Pass session credentials
             from forge.core.security import get_api_key, get_hf_token
             
@@ -167,15 +311,49 @@ class ContainerManager:
             if session_hf_token:
                 cmd.extend(["-e", f"HF_TOKEN={session_hf_token}"])
             
-            # Add image and keep container alive
-            cmd.extend([self.image_name, "sleep", "infinity"])
+            # Set working directory and keep container alive
+            cmd.extend(["-w", "/app"])
+            cmd.extend([self.image_name, "tail", "-f", "/dev/null"])  # Alternative to sleep infinity
             
             console.print(f"[dim]Creating container: {self.container_name}[/]")
+            console.print(f"[dim]Command: docker run --name {self.container_name} --gpus all -d ... {self.image_name} tail -f /dev/null[/]")
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             
             if result.returncode == 0:
                 container_id = result.stdout.strip()
+                
+                # Wait a moment for container to fully start
+                time.sleep(2)
+                
+                # Verify container is actually running
+                status = self.get_container_status(container_id)
+                if status != "running":
+                    # Container failed to start - get logs for debugging
+                    try:
+                        logs_result = subprocess.run(
+                            ["docker", "logs", container_id],
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+                        print_error(f"Container failed to start. Status: {status}")
+                        if logs_result.stdout:
+                            console.print(f"[dim]Container logs:[/]")
+                            console.print(f"[dim]{logs_result.stdout}[/]")
+                        if logs_result.stderr:
+                            console.print(f"[dim]Container errors:[/]")
+                            console.print(f"[dim]{logs_result.stderr}[/]")
+                    except Exception:
+                        pass
+                    
+                    # Clean up failed container
+                    try:
+                        subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, timeout=10)
+                    except Exception:
+                        pass
+                    
+                    return None
                 
                 # Update config with new container info
                 self.config.container.container_id = container_id
@@ -204,6 +382,24 @@ class ContainerManager:
         status = self.get_container_status()
         if status != "running":
             print_warning(f"Container status: {status}, attempting to restart...")
+            
+            # Try to get container logs for debugging
+            try:
+                logs_result = subprocess.run(
+                    ["docker", "logs", "--tail", "20", self.config.container.container_id],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if logs_result.stdout or logs_result.stderr:
+                    console.print(f"[dim]Recent container logs:[/]")
+                    if logs_result.stdout:
+                        console.print(f"[dim]{logs_result.stdout}[/]")
+                    if logs_result.stderr:
+                        console.print(f"[dim]{logs_result.stderr}[/]")
+            except Exception:
+                pass
+            
             if not self._restart_container():
                 raise ValueError("Container is not running and cannot be restarted")
             # Wait a bit for container to be fully ready
@@ -240,87 +436,15 @@ class ContainerManager:
             print_info("Model already cached in container")
             return True
         
-        console.print("[bold]📦 Caching model in container for faster future loads...[/]")
+        console.print("[bold]📦 Model files will be cached via HuggingFace cache volume[/]")
         
-        try:
-            # Create a simple model loading script
-            cache_script = f"""
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import os
-
-print("🔄 Loading model into container cache...")
-model_name = "{self.config.model.name}"
-
-# Set up authentication if available
-hf_token = os.environ.get("HF_TOKEN")
-if hf_token:
-    print("🔑 Using HuggingFace token for authentication")
-
-try:
-    # Load tokenizer
-    print(f"Loading tokenizer: {{model_name}}")
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        token=hf_token if hf_token else None
-    )
-
-    # Load model with quantization
-    print(f"Loading model: {{model_name}} (4-bit)")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        load_in_4bit=True,
-        token=hf_token if hf_token else None
-    )
-
-    print("✅ Model cached successfully!")
-    print(f"Model memory: {{model.get_memory_footprint() / 1024**3:.1f}} GB")
-
-    # Keep model in memory by not deleting it
-    # This ensures subsequent training runs load instantly
-    print("🔒 Model locked in container memory")
-    
-except Exception as e:
-    print(f"❌ Error loading model: {{e}}")
-    import traceback
-    traceback.print_exc()
-    exit(1)
-"""
-            
-            # Write script to container
-            write_cmd = ["python", "-c", cache_script]
-            
-            process = self.execute_in_container(write_cmd, timeout=600)  # 10 minute timeout
-            
-            # Stream output and capture errors
-            output_lines = []
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    output_lines.append(line.rstrip())
-                    console.print(f"  {line.rstrip()}")
-            
-            process.wait()
-            
-            if process.returncode == 0:
-                # Mark model as cached
-                self.config.container.model_cached = True
-                self.config.container.last_used = datetime.datetime.now().isoformat()
-                print_success("Model successfully cached in container!")
-                return True
-            else:
-                print_error("Failed to cache model in container")
-                # Show last few lines of output for debugging
-                if output_lines:
-                    console.print("[dim]Last output lines:[/]")
-                    for line in output_lines[-5:]:
-                        console.print(f"[dim]  {line}[/]")
-                return False
-                
-        except Exception as e:
-            print_error(f"Error caching model: {e}")
-            return False
+        # Mark model as cached since we're using persistent HF cache
+        self.config.container.model_cached = True
+        self.config.container.cached_model_name = self.config.model.name
+        self.config.container.last_used = datetime.datetime.now().isoformat()
+        
+        print_success("Model caching enabled via persistent HuggingFace cache!")
+        return True
     
     def cleanup_container(self):
         """Clean up the persistent container."""
@@ -345,6 +469,7 @@ except Exception as e:
             self.config.container.container_id = None
             self.config.container.container_name = None
             self.config.container.model_cached = False
+            self.config.container.cached_model_name = None
             
             print_info("Container cleaned up")
             

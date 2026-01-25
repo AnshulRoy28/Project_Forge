@@ -18,6 +18,44 @@ app = typer.Typer(
 
 
 @app.command()
+def list():
+    """List all Forge containers."""
+    console.print("\n[bold]🐳 All Forge Containers[/]\n")
+    
+    try:
+        import subprocess
+        
+        # Find all containers with forge- prefix
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=forge-", "--format", "table {{.ID}}\\t{{.Names}}\\t{{.Status}}\\t{{.Image}}\\t{{.CreatedAt}}"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            if output:
+                lines = output.split('\n')
+                if len(lines) > 1:  # Has header + data
+                    console.print(output)
+                else:
+                    console.print("  [dim]No Forge containers found[/]")
+            else:
+                console.print("  [dim]No Forge containers found[/]")
+        else:
+            print_error("Failed to list containers")
+        
+        console.print()
+        console.print("[dim]Use 'forge container status' to see details for the current project[/]")
+        console.print("[dim]Use 'forge container cleanup' to remove the current project's container[/]")
+        
+    except Exception as e:
+        print_error(f"Error listing containers: {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
 def status():
     """Show status of persistent containers."""
     console.print("\n[bold]🐳 Container Status[/]\n")
@@ -45,6 +83,10 @@ def status():
             console.print(f"  Status: [{'green' if info['status'] == 'running' else 'yellow'}]{info['status']}[/]")
             console.print(f"  Image: [cyan]{info.get('image', 'unknown')}[/]")
             console.print(f"  Model Cached: [{'green' if info.get('model_cached') else 'yellow'}]{info.get('model_cached', False)}[/]")
+            
+            # Show which model is cached
+            if info.get('model_cached') and config.container.cached_model_name:
+                console.print(f"  Cached Model: [cyan]{config.container.cached_model_name}[/]")
             
             if info.get('created'):
                 console.print(f"  Created: [dim]{info['created'][:19]}[/]")
@@ -86,6 +128,11 @@ def cleanup(
         console.print(f"  Container: [cyan]{info.get('id', 'unknown')}[/]")
         console.print(f"  Status: [cyan]{info.get('status', 'unknown')}[/]")
         console.print(f"  Model Cached: [cyan]{info.get('model_cached', False)}[/]")
+        
+        # Show which model will be lost
+        if info.get('model_cached') and config.container.cached_model_name:
+            console.print(f"  Cached Model: [yellow]{config.container.cached_model_name}[/] (will be lost)")
+        
         console.print()
         
         if not force:

@@ -110,6 +110,7 @@ class ContainerConfig:
     container_id: Optional[str] = None
     container_name: Optional[str] = None
     model_cached: bool = False
+    cached_model_name: Optional[str] = None  # Track which model is cached
     last_used: Optional[str] = None
     gpu_arch: Optional[str] = None
 

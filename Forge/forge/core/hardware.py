@@ -24,7 +24,13 @@ try:
     import warnings
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=FutureWarning)
-        import pynvml
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", message=".*pynvml.*deprecated.*")
+        try:
+            import pynvml  # type: ignore[import]
+        except ImportError:
+            # Try the new package name
+            import nvidia_ml_py as pynvml  # type: ignore[import]
     PYNVML_AVAILABLE = True
 except ImportError:
     PYNVML_AVAILABLE = False

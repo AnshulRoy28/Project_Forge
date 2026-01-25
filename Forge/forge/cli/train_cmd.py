@@ -405,7 +405,7 @@ def _run_with_healing(
 
 
 def _run_docker_training(config_v2, resume: bool, dry_run: bool) -> Tuple[bool, str]:
-    """Execute training in Docker container using simple one-shot run."""
+    """Execute training in Docker container with HuggingFace cache persistence."""
     
     # Determine Docker image based on GPU architecture
     image_name = f"forge:{config_v2.hardware.gpu_arch.value}"
@@ -413,6 +413,158 @@ def _run_docker_training(config_v2, resume: bool, dry_run: bool) -> Tuple[bool, 
     console.print(f"[bold]🐳 Training in Docker ({config_v2.hardware.gpu_arch.value})[/]")
     console.print()
     
+    # Check for existing compatible container first
+    existing_container = _check_existing_container(config_v2)
+    
+    if existing_container:
+        console.print(f"[bold]♻️  Reusing existing container: [cyan]{existing_container[:12]}[/]")
+        return _run_in_existing_container(config_v2, existing_container, resume, dry_run)
+    else:
+        console.print("[bold]🆕 Creating new training container with persistent model cache[/]")
+        return _run_in_new_container_with_cache(config_v2, image_name, resume, dry_run)
+
+
+def _check_existing_container(config_v2) -> Optional[str]:
+    """Check for existing container and handle model compatibility."""
+    if not config_v2.container.container_id:
+        return None
+    
+    # Check if container exists
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", config_v2.container.container_id],
+            capture_output=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            console.print("[dim]Previous container no longer exists, creating new one...[/]")
+            config_v2.container.container_id = None
+            config_v2.container.model_cached = False
+            return None
+    except Exception:
+        return None
+    
+    # Check model compatibility
+    if config_v2.container.model_cached:
+        cached_model = getattr(config_v2.container, 'cached_model_name', None)
+        current_model = config_v2.model.name
+        
+        if cached_model and cached_model != current_model:
+            console.print(f"[yellow]⚠️  Container has cached model: [cyan]{cached_model}[/]")
+            console.print(f"[yellow]   But you're trying to train: [cyan]{current_model}[/]")
+            console.print()
+            
+            from rich.prompt import Confirm
+            if Confirm.ask("[yellow]Delete existing container and create new one?[/]", default=True):
+                console.print("[dim]Removing incompatible container...[/]")
+                try:
+                    subprocess.run(["docker", "rm", "-f", config_v2.container.container_id], capture_output=True, timeout=30)
+                except Exception:
+                    pass
+                config_v2.container.container_id = None
+                config_v2.container.model_cached = False
+                config_v2.save(Path("forge.yaml"))
+                return None
+            else:
+                console.print("[yellow]Continuing with existing container (may cause issues)[/]")
+    
+    return config_v2.container.container_id
+
+
+def _run_in_existing_container(config_v2, container_id: str, resume: bool, dry_run: bool) -> Tuple[bool, str]:
+    """Run training in an existing container."""
+    # Start container if not running
+    try:
+        status_result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Status}}", container_id],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if status_result.returncode == 0:
+            status = status_result.stdout.strip()
+            if status != "running":
+                console.print(f"[dim]Starting existing container: {container_id[:12]}[/]")
+                subprocess.run(["docker", "start", container_id], capture_output=True, timeout=30)
+                time.sleep(2)  # Wait for container to be ready
+    except Exception:
+        pass
+    
+    # Create temporary old-format config for training
+    temp_config_path = Path("./forge_temp.yaml")
+    try:
+        from forge.core.config import save_config
+        old_config = _convert_v2_to_v1_config(config_v2)
+        save_config(old_config, temp_config_path)
+        
+        # Copy config file into container
+        copy_config_cmd = [
+            "docker", "cp", 
+            str(temp_config_path.resolve()),
+            f"{container_id}:/app/forge.yaml"
+        ]
+        
+        copy_result = subprocess.run(copy_config_cmd, capture_output=True, text=True, timeout=30)
+        if copy_result.returncode != 0:
+            return False, f"Failed to copy config to container: {copy_result.stderr}"
+        
+        # Build docker exec command with HF cache
+        cmd = [
+            "docker", "exec", "-i",
+            "-e", "PYTHONPATH=/app/forge_src",
+            "-e", "HF_HOME=/root/.cache/huggingface",
+            "-w", "/app",
+        ]
+        
+        # Pass session credentials
+        from forge.core.security import get_api_key, get_hf_token
+        
+        session_api_key = get_api_key()
+        if session_api_key:
+            cmd.extend(["-e", f"GEMINI_API_KEY={session_api_key}"])
+        
+        session_hf_token = get_hf_token()
+        if session_hf_token:
+            cmd.extend(["-e", f"HF_TOKEN={session_hf_token}"])
+        
+        # Add container ID and training command
+        python_cmd = ["python3", "-m", "forge", "train-internal"]
+        if resume:
+            python_cmd.append("--resume")
+        if dry_run:
+            python_cmd.append("--dry-run")
+        
+        cmd.append(container_id)
+        cmd.extend(python_cmd)
+        
+        console.print(f"[dim]$ docker exec -i {container_id[:12]} python3 -m forge train-internal[/]")
+        console.print()
+        
+        # Execute training
+        success, error_output = _execute_training_process(cmd)
+        
+        if success:
+            # Mark model as cached after successful training
+            config_v2.container.model_cached = True
+            config_v2.container.cached_model_name = config_v2.model.name
+            config_v2.container.last_used = datetime.datetime.now().isoformat()
+            config_v2.save(Path("forge.yaml"))
+            
+            console.print()
+            console.print("[bold green]🎉 Training completed successfully![/]")
+            console.print(f"[dim]Container {container_id[:12]} kept running with cached model for faster future training[/]")
+            console.print()
+        
+        return success, error_output
+    
+    finally:
+        if temp_config_path.exists():
+            temp_config_path.unlink()
+
+
+def _run_in_new_container_with_cache(config_v2, image_name: str, resume: bool, dry_run: bool) -> Tuple[bool, str]:
+    """Run training in a new container with persistent HuggingFace cache."""
     # Create temporary old-format config for training
     temp_config_path = Path("./forge_temp.yaml")
     try:
@@ -423,17 +575,32 @@ def _run_docker_training(config_v2, resume: bool, dry_run: bool) -> Tuple[bool, 
         # Get the Forge package directory
         forge_package_dir = Path(__file__).parent.parent.parent.resolve()
         
-        # Build docker run command
+        # Generate container name
+        container_name = f"forge-{config_v2.model.name.replace('/', '-').replace('_', '-').lower()}"
+        
+        # Remove any existing container with this name
+        try:
+            subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=10)
+        except Exception:
+            pass
+        
+        # Create persistent HuggingFace cache directory
+        hf_cache_dir = Path.home() / ".cache" / "huggingface"
+        hf_cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Build docker run command with persistent HuggingFace cache
         cmd = [
             "docker", "run",
-            "--rm",  # Remove container after exit
+            "--name", container_name,
             "--gpus", "all",
             "-v", f"{Path('./data').resolve()}:/data",
             "-v", f"{Path('./output').resolve()}:/output",
             "-v", f"{Path('./checkpoints').resolve()}:/checkpoints",
             "-v", f"{temp_config_path.resolve()}:/app/forge.yaml",
             "-v", f"{forge_package_dir}:/app/forge_src",  # Mount forge source
+            "-v", f"{hf_cache_dir}:/root/.cache/huggingface",  # Persistent HF cache
             "-e", "PYTHONPATH=/app/forge_src",  # Add forge source to Python path
+            "-e", "HF_HOME=/root/.cache/huggingface",  # Set HF cache location
             "-w", "/app",
             "--entrypoint", "python3",  # Override entrypoint
         ]
@@ -449,7 +616,7 @@ def _run_docker_training(config_v2, resume: bool, dry_run: bool) -> Tuple[bool, 
         if session_hf_token:
             cmd.extend(["-e", f"HF_TOKEN={session_hf_token}"])
         
-        # Add image and training command (use python -m to run forge)
+        # Add image and training command
         python_cmd = ["-m", "forge", "train-internal"]
         if resume:
             python_cmd.append("--resume")
@@ -459,46 +626,94 @@ def _run_docker_training(config_v2, resume: bool, dry_run: bool) -> Tuple[bool, 
         cmd.append(image_name)
         cmd.extend(python_cmd)
         
-        console.print(f"[dim]$ docker run --rm --gpus all ... {image_name} python3 {' '.join(python_cmd)}[/]")
+        console.print(f"[dim]$ docker run --name {container_name} --gpus all ... {image_name} python3 {' '.join(python_cmd)}[/]")
+        console.print(f"[dim]HuggingFace cache: {hf_cache_dir}[/]")
         console.print()
         
         # Execute training
-        error_output = []
+        success, error_output = _execute_training_process(cmd)
         
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1
-            )
-            
-            # Stream output
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-                    error_output.append(line)
-                    if len(error_output) > 100:
-                        error_output.pop(0)
-            
-            process.wait()
-            
-            if process.returncode == 0:
-                return True, ""
-            else:
-                return False, "\n".join(error_output)
+        if success:
+            # Training succeeded - get container ID and mark as persistent
+            try:
+                get_id_result = subprocess.run(
+                    ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.ID}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
                 
-        except Exception as e:
-            return False, str(e)
+                if get_id_result.returncode == 0 and get_id_result.stdout.strip():
+                    container_id = get_id_result.stdout.strip()
+                    
+                    # Update config with container info
+                    config_v2.container.container_id = container_id
+                    config_v2.container.container_name = container_name
+                    config_v2.container.model_cached = True
+                    config_v2.container.cached_model_name = config_v2.model.name
+                    config_v2.container.gpu_arch = config_v2.hardware.gpu_arch.value
+                    config_v2.container.last_used = datetime.datetime.now().isoformat()
+                    
+                    # Save updated config
+                    config_v2.save(Path("forge.yaml"))
+                    
+                    console.print()
+                    console.print("[bold green]🎉 Training completed successfully![/]")
+                    console.print(f"[dim]Container {container_id[:12]} preserved with cached model files[/]")
+                    console.print(f"[dim]HuggingFace cache persisted at: {hf_cache_dir}[/]")
+                    console.print("[dim]Next training run will skip model download![/]")
+                    console.print()
+                    
+            except Exception as e:
+                console.print(f"[dim]Warning: Could not preserve container: {e}[/]")
+        else:
+            # Training failed - clean up the failed container
+            try:
+                subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=30)
+                console.print(f"[dim]Cleaned up failed container: {container_name}[/]")
+            except Exception:
+                pass
+        
+        return success, error_output
     
     finally:
-        # Clean up temporary config file
         if temp_config_path.exists():
             temp_config_path.unlink()
+
+
+def _execute_training_process(cmd: list) -> Tuple[bool, str]:
+    """Execute the training process and return success status and error output."""
+    error_output = []
+    
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1
+        )
+        
+        # Stream output
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                error_output.append(line)
+                if len(error_output) > 100:
+                    error_output.pop(0)
+        
+        process.wait()
+        
+        if process.returncode == 0:
+            return True, ""
+        else:
+            return False, "\n".join(error_output)
+            
+    except Exception as e:
+        return False, str(e)
 
 
 def _try_auto_fix(error: str, config: ForgeConfig) -> Tuple[bool, ForgeConfig]:
