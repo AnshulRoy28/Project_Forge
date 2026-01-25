@@ -7,6 +7,7 @@ Manages persistent Docker containers with model caching for faster training resu
 import subprocess
 import time
 import json
+import datetime
 from typing import Optional, Dict, Any
 from pathlib import Path
 import datetime
@@ -105,6 +106,43 @@ class ContainerManager:
     def _create_new_container(self) -> Optional[str]:
         """Create a new persistent container."""
         try:
+            # Check if container with this name already exists
+            check_cmd = ["docker", "ps", "-a", "--filter", f"name={self.container_name}", "--format", "{{.ID}}"]
+            check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=10)
+            
+            if check_result.returncode == 0 and check_result.stdout.strip():
+                # Container exists, try to use it
+                existing_id = check_result.stdout.strip()
+                console.print(f"[dim]Found existing container: {existing_id}[/]")
+                
+                # Update config with existing container
+                self.config.container.container_id = existing_id
+                self.config.container.container_name = self.container_name
+                
+                # Try to start it if not running
+                status = self.get_container_status()
+                if status != "running":
+                    if self._restart_container():
+                        console.print("✓ Reused existing container")
+                        return existing_id
+                    else:
+                        # Container can't be restarted - remove it and create new one
+                        console.print("[dim]Removing stuck container and creating new one...[/]")
+                        try:
+                            subprocess.run(
+                                ["docker", "rm", "-f", existing_id],
+                                capture_output=True,
+                                timeout=30
+                            )
+                            # Clear the container config
+                            self.config.container.container_id = None
+                            self.config.container.model_cached = False
+                        except Exception as e:
+                            print_warning(f"Failed to remove container: {e}")
+                else:
+                    console.print("✓ Reused running container")
+                    return existing_id
+            
             # Build docker run command for persistent container
             cmd = [
                 "docker", "run",
@@ -162,6 +200,15 @@ class ContainerManager:
         if not self.config.container.container_id:
             raise ValueError("No container available")
         
+        # Ensure container is running and healthy
+        status = self.get_container_status()
+        if status != "running":
+            print_warning(f"Container status: {status}, attempting to restart...")
+            if not self._restart_container():
+                raise ValueError("Container is not running and cannot be restarted")
+            # Wait a bit for container to be fully ready
+            time.sleep(3)
+        
         # Build docker exec command
         exec_cmd = [
             "docker", "exec",
@@ -205,25 +252,41 @@ import os
 print("🔄 Loading model into container cache...")
 model_name = "{self.config.model.name}"
 
-# Load tokenizer
-print(f"Loading tokenizer: {{model_name}}")
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+# Set up authentication if available
+hf_token = os.environ.get("HF_TOKEN")
+if hf_token:
+    print("🔑 Using HuggingFace token for authentication")
 
-# Load model with quantization
-print(f"Loading model: {{model_name}} (4-bit)")
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    torch_dtype=torch.bfloat16,
-    device_map="auto",
-    load_in_4bit=True,
-)
+try:
+    # Load tokenizer
+    print(f"Loading tokenizer: {{model_name}}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        token=hf_token if hf_token else None
+    )
 
-print("✅ Model cached successfully!")
-print(f"Model memory: {{model.get_memory_footprint() / 1024**3:.1f} GB")
+    # Load model with quantization
+    print(f"Loading model: {{model_name}} (4-bit)")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        load_in_4bit=True,
+        token=hf_token if hf_token else None
+    )
 
-# Keep model in memory by not deleting it
-# This ensures subsequent training runs load instantly
-print("🔒 Model locked in container memory")
+    print("✅ Model cached successfully!")
+    print(f"Model memory: {{model.get_memory_footprint() / 1024**3:.1f}} GB")
+
+    # Keep model in memory by not deleting it
+    # This ensures subsequent training runs load instantly
+    print("🔒 Model locked in container memory")
+    
+except Exception as e:
+    print(f"❌ Error loading model: {{e}}")
+    import traceback
+    traceback.print_exc()
+    exit(1)
 """
             
             # Write script to container
@@ -231,9 +294,11 @@ print("🔒 Model locked in container memory")
             
             process = self.execute_in_container(write_cmd, timeout=600)  # 10 minute timeout
             
-            # Stream output
+            # Stream output and capture errors
+            output_lines = []
             for line in iter(process.stdout.readline, ''):
                 if line:
+                    output_lines.append(line.rstrip())
                     console.print(f"  {line.rstrip()}")
             
             process.wait()
@@ -246,6 +311,11 @@ print("🔒 Model locked in container memory")
                 return True
             else:
                 print_error("Failed to cache model in container")
+                # Show last few lines of output for debugging
+                if output_lines:
+                    console.print("[dim]Last output lines:[/]")
+                    for line in output_lines[-5:]:
+                        console.print(f"[dim]  {line}[/]")
                 return False
                 
         except Exception as e:

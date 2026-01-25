@@ -80,6 +80,11 @@ app.add_typer(container_app, name="container", help="📦 Persistent container m
 app.add_typer(export_app, name="export", help="📦 Export models to various formats")
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the forge CLI."""
     app()
+
+
+if __name__ == "__main__":
+    main()
 

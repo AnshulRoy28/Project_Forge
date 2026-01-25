@@ -10,18 +10,74 @@ import hashlib
 import os
 import atexit
 import tempfile
+import hashlib
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
-# Session-based credential storage (in-memory only)
-_session_credentials = {
-    "gemini_api_key": None,
-    "huggingface_token": None,
-}
-
-# Temporary file for session tracking (auto-deleted)
+# Session-based credential storage (persists across commands in same terminal session)
+_session_credentials = {}
 _session_file = None
+
+def _get_session_file():
+    """Get or create session file for credential persistence."""
+    global _session_file
+    if _session_file is None:
+        # Create session file in temp directory with user-specific name
+        import getpass
+        
+        # Use user + current working directory hash for session identification
+        # This ensures credentials persist across commands in the same project
+        import hashlib
+        cwd_hash = hashlib.md5(str(Path.cwd()).encode()).hexdigest()[:8]
+        session_id = f"{getpass.getuser()}_{cwd_hash}"
+        
+        _session_file = Path(tempfile.gettempdir()) / f"forge_session_{session_id}.json"
+        
+        # Register cleanup on exit
+        atexit.register(_cleanup_session)
+    
+    return _session_file
+
+def _load_session_credentials():
+    """Load credentials from session file."""
+    global _session_credentials
+    try:
+        session_file = _get_session_file()
+        if session_file.exists():
+            import json
+            with open(session_file, 'r') as f:
+                _session_credentials = json.load(f)
+        else:
+            _session_credentials = {}
+    except Exception:
+        _session_credentials = {}
+
+def _save_session_credentials():
+    """Save credentials to session file."""
+    try:
+        session_file = _get_session_file()
+        import json
+        with open(session_file, 'w') as f:
+            json.dump(_session_credentials, f)
+    except Exception:
+        pass  # Fail silently
+
+def _cleanup_session():
+    """Clean up session file."""
+    try:
+        session_file = _get_session_file()
+        if session_file.exists():
+            session_file.unlink()
+    except Exception:
+        pass
+
+# Load existing session on module import
+try:
+    _load_session_credentials()
+except Exception as e:
+    # Fail silently on import, but ensure _session_credentials is initialized
+    _session_credentials = {}
 
 
 @dataclass
@@ -165,19 +221,6 @@ def _cleanup_session():
             del os.environ[key]
 
 
-def _init_session():
-    """Initialize session tracking and register cleanup."""
-    global _session_file
-    
-    if _session_file is None:
-        # Create temporary session file
-        fd, _session_file = tempfile.mkstemp(prefix="forge_session_", suffix=".tmp")
-        os.close(fd)
-        
-        # Register cleanup functions
-        atexit.register(_cleanup_session)
-
-
 def store_api_key(api_key: str) -> bool:
     """
     Store the Gemini API key in session memory only.
@@ -185,8 +228,8 @@ def store_api_key(api_key: str) -> bool:
     Returns True on success.
     """
     try:
-        _init_session()
         _session_credentials["gemini_api_key"] = api_key
+        _save_session_credentials()
         # Also set as environment variable for Docker containers
         os.environ["GEMINI_API_KEY"] = api_key
         return True
@@ -225,8 +268,8 @@ def store_hf_token(token: str) -> bool:
     Returns True on success.
     """
     try:
-        _init_session()
         _session_credentials["huggingface_token"] = token
+        _save_session_credentials()
         # Also set as environment variable for Docker containers
         os.environ["HF_TOKEN"] = token
         return True
@@ -270,6 +313,9 @@ def has_credentials() -> tuple[bool, bool]:
     
     Returns (has_gemini_key, has_hf_token).
     """
+    # Ensure session is loaded
+    _load_session_credentials()
+    
     return (
         _session_credentials.get("gemini_api_key") is not None,
         _session_credentials.get("huggingface_token") is not None

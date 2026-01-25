@@ -387,15 +387,14 @@ def _run_with_healing(
             if success:
                 return True
             
-            # Training failed - try to heal
-            if not auto_heal or attempt >= MAX_HEAL_ATTEMPTS - 1:
+            # Training failed - for now just retry without auto-healing
+            if attempt >= MAX_HEAL_ATTEMPTS - 1:
                 _show_gemini_diagnosis(error_output, config_v2)
                 return False
             
-            # Try to auto-fix (would need to be adapted for v2 config)
-            print_warning("Auto-healing not yet implemented for v2 config format")
-            _show_gemini_diagnosis(error_output, config_v2)
-            return False
+            # Simple retry - just continue to next attempt
+            print_warning(f"Training failed, retrying... ({attempt + 1}/{MAX_HEAL_ATTEMPTS})")
+            continue
                 
         except KeyboardInterrupt:
             console.print("\n[yellow]Training interrupted by user.[/]")
@@ -406,34 +405,12 @@ def _run_with_healing(
 
 
 def _run_docker_training(config_v2, resume: bool, dry_run: bool) -> Tuple[bool, str]:
-    """Execute training in persistent Docker container with model caching."""
+    """Execute training in Docker container using simple one-shot run."""
     
-    # Initialize container manager
-    from forge.core.container_manager import ContainerManager
-    container_mgr = ContainerManager(config_v2)
+    # Determine Docker image based on GPU architecture
+    image_name = f"forge:{config_v2.hardware.gpu_arch.value}"
     
-    # Start or reuse persistent container
-    container_id = container_mgr.start_persistent_container()
-    
-    if not container_id:
-        return False, "Failed to start persistent container"
-    
-    # Cache model in container if not already cached
-    if not config_v2.container.model_cached:
-        console.print(f"[bold]🚀 First-time setup: Caching model in container[/]")
-        console.print(f"[dim]This will make future training sessions much faster![/]")
-        console.print()
-        
-        if container_mgr.cache_model_in_container():
-            # Save updated config with cached model info
-            config_v2.save(Path("forge.yaml"))
-        else:
-            print_warning("Model caching failed, but training will continue")
-    else:
-        print_success(f"Using cached model from container: {container_id[:12]}")
-    
-    console.print(f"[bold]🐳 Training in persistent container ({config_v2.hardware.gpu_arch.value})[/]")
-    console.print(f"[dim]Container: {container_id[:12]} | Model cached: {config_v2.container.model_cached}[/]")
+    console.print(f"[bold]🐳 Training in Docker ({config_v2.hardware.gpu_arch.value})[/]")
     console.print()
     
     # Create temporary old-format config for training
@@ -443,67 +420,74 @@ def _run_docker_training(config_v2, resume: bool, dry_run: bool) -> Tuple[bool, 
         old_config = _convert_v2_to_v1_config(config_v2)
         save_config(old_config, temp_config_path)
         
-        # Copy config to container
-        copy_cmd = [
-            "docker", "cp", 
-            str(temp_config_path.resolve()),
-            f"{container_id}:/app/forge.yaml"
+        # Get the Forge package directory
+        forge_package_dir = Path(__file__).parent.parent.parent.resolve()
+        
+        # Build docker run command
+        cmd = [
+            "docker", "run",
+            "--rm",  # Remove container after exit
+            "--gpus", "all",
+            "-v", f"{Path('./data').resolve()}:/data",
+            "-v", f"{Path('./output').resolve()}:/output",
+            "-v", f"{Path('./checkpoints').resolve()}:/checkpoints",
+            "-v", f"{temp_config_path.resolve()}:/app/forge.yaml",
+            "-v", f"{forge_package_dir}:/app/forge_src",  # Mount forge source
+            "-e", "PYTHONPATH=/app/forge_src",  # Add forge source to Python path
+            "-w", "/app",
+            "--entrypoint", "python3",  # Override entrypoint
         ]
         
-        subprocess.run(copy_cmd, check=True, timeout=30)
+        # Pass session credentials
+        from forge.core.security import get_api_key, get_hf_token
         
-        # Build forge command inside container
-        forge_cmd = ["forge", "train-internal"]
+        session_api_key = get_api_key()
+        if session_api_key:
+            cmd.extend(["-e", f"GEMINI_API_KEY={session_api_key}"])
+        
+        session_hf_token = get_hf_token()
+        if session_hf_token:
+            cmd.extend(["-e", f"HF_TOKEN={session_hf_token}"])
+        
+        # Add image and training command (use python -m to run forge)
+        python_cmd = ["-m", "forge", "train-internal"]
         if resume:
-            forge_cmd.append("--resume")
+            python_cmd.append("--resume")
         if dry_run:
-            forge_cmd.append("--dry-run")
+            python_cmd.append("--dry-run")
         
-        # Execute training in persistent container
+        cmd.append(image_name)
+        cmd.extend(python_cmd)
+        
+        console.print(f"[dim]$ docker run --rm --gpus all ... {image_name} python3 {' '.join(python_cmd)}[/]")
+        console.print()
+        
+        # Execute training
         error_output = []
         
         try:
-            process = container_mgr.execute_in_container(forge_cmd)
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1
+            )
             
-            # Add timeout and heartbeat detection
-            last_output_time = time.time()
-            timeout_seconds = 1800  # 30 minutes timeout
-            heartbeat_interval = 60  # Print heartbeat every 60 seconds of silence
-            
+            # Stream output
             for line in iter(process.stdout.readline, ''):
                 if line:
-                    # Print line to console
                     sys.stdout.write(line)
                     sys.stdout.flush()
-                    
-                    # Update last output time
-                    last_output_time = time.time()
-                    
-                    # Collect for error analysis
                     error_output.append(line)
-                    
-                    # Keep only last 100 lines for error analysis
                     if len(error_output) > 100:
                         error_output.pop(0)
-                else:
-                    # Check for timeout or need for heartbeat
-                    current_time = time.time()
-                    elapsed_since_output = current_time - last_output_time
-                    
-                    if elapsed_since_output > timeout_seconds:
-                        print_error(f"Training timed out after {timeout_seconds/60:.1f} minutes of no output")
-                        process.terminate()
-                        return False, "Training timeout - no output received"
-                    
-                    elif elapsed_since_output > heartbeat_interval and elapsed_since_output % heartbeat_interval < 1:
-                        console.print(f"[dim]⏱️  Training in progress... ({elapsed_since_output/60:.1f}m since last output)[/]")
             
             process.wait()
             
             if process.returncode == 0:
-                # Update container last used time
-                config_v2.container.last_used = datetime.datetime.now().isoformat()
-                config_v2.save(Path("forge.yaml"))
                 return True, ""
             else:
                 return False, "\n".join(error_output)

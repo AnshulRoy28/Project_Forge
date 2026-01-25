@@ -213,7 +213,7 @@ class ForgeTrainer:
                 # Sequence settings
                 max_length=training.max_seq_length,
                 dataset_text_field="text",
-                packing=False,
+                packing=True,  # 2-5x speedup by eliminating padding waste
                 
                 # Speed optimizations
                 dataloader_pin_memory=True,
@@ -265,7 +265,7 @@ class ForgeTrainer:
                 data_collator=data_collator,
                 max_seq_length=training.max_seq_length,
                 dataset_text_field="text",
-                packing=False,
+                packing=True,  # 2-5x speedup
             )
         
         # Progress callback
