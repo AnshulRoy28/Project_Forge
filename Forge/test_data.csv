@@ -1,6 +1,0 @@
-query,response
-"How do I create a Python function?","To create a Python function, use the 'def' keyword followed by the function name and parameters. For example: def my_function(param1, param2): return param1 + param2"
-"What is a list in Python?","A list in Python is an ordered collection of items that can be changed. You create a list using square brackets: my_list = [1, 2, 3, 'hello']"
-"How do I install packages in Python?","You can install Python packages using pip. For example: pip install package_name. Make sure you have pip installed first."
-"What is the difference between a list and a tuple?","Lists are mutable (can be changed) and use square brackets []. Tuples are immutable (cannot be changed) and use parentheses ()."
-"How do I read a file in Python?","You can read a file using: with open('filename.txt', 'r') as file: content = file.read(). This automatically closes the file when done."
