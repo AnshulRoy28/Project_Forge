@@ -1,0 +1,3 @@
+[console_scripts]
+gdp = gemini_processor.cli:main
+gemini-processor = gemini_processor.cli:main
