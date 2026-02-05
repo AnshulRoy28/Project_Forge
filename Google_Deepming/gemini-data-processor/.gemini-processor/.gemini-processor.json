@@ -1,0 +1,19 @@
+{
+  "security": {
+    "enable_container_isolation": true,
+    "run_containers_as_non_root": true,
+    "enable_network_isolation": true,
+    "sanitize_sensitive_data": true
+  },
+  "resources": {
+    "max_container_memory_gb": 4,
+    "max_container_cpu_cores": 2,
+    "max_container_disk_gb": 10,
+    "max_execution_time_minutes": 30
+  },
+  "gemini": {
+    "model_name": "gemini-2.0-flash",
+    "max_tokens": 8192,
+    "temperature": 0.7
+  }
+}
