@@ -1,0 +1,29 @@
+# ===========================================================================
+# docker-compose.yml — One-command demo launch
+# ===========================================================================
+#
+# Usage:
+#   GEMINI_API_KEY=<your-key> docker compose up -d
+#   docker compose exec nnb bash
+#
+# Then inside the container:
+#   nnb start
+# ===========================================================================
+
+services:
+  nnb:
+    build: .
+    container_name: project-forge
+    stdin_open: true   # -i
+    tty: true          # -t
+    volumes:
+      # Mount host Docker socket — lets nnb create sibling training containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persist projects between runs
+      - nnb-data:/app/.nnb
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    restart: unless-stopped
+
+volumes:
+  nnb-data:

@@ -1,0 +1,21 @@
+# Configuration for MNIST FeedForwardNN Training
+
+# Model Parameters
+model_params:
+  input_size: 784        # 28x28 pixels flattened
+  hidden_size: 48        # Number of neurons in the single hidden layer
+  num_classes: 10        # Number of output classes (digits 0-9)
+
+# Data Parameters
+data_params:
+  data_root: /workspace/data # Directory inside Docker container for dataset storage (changed to writable /workspace)
+  batch_size: 64         # Number of samples per batch
+
+# Training Parameters
+training_params:
+  epochs: 10             # Number of training epochs
+  learning_rate: 0.001   # Learning rate for the optimizer
+  optimizer: Adam        # Optimizer to use (e.g., Adam, SGD)
+  checkpoint_dir: /workspace/checkpoints # Directory inside Docker container to save model checkpoints (read-write mount)
+  final_model_path: /workspace/model.pth # Path to save the final trained model (read-write mount)
+  log_dir: /workspace/logs # Directory for training logs and TensorBoard events (read-write mount)

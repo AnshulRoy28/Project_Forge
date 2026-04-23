@@ -13,6 +13,7 @@ class State(str, Enum):
     DATA_VALIDATED = "DATA_VALIDATED"
     ENV_BUILDING = "ENV_BUILDING"
     ENV_READY = "ENV_READY"
+    CODE_GENERATED = "CODE_GENERATED"
     MOCK_RUNNING = "MOCK_RUNNING"
     MOCK_PASSED = "MOCK_PASSED"
     TRAINING = "TRAINING"
@@ -28,11 +29,12 @@ class State(str, Enum):
             State.SPEC_CONFIRMED: [State.DATA_REQUIRED],
             State.DATA_REQUIRED: [State.DATA_VALIDATED],
             State.DATA_VALIDATED: [State.ENV_BUILDING],
-            State.ENV_BUILDING: [State.ENV_READY],
-            State.ENV_READY: [State.MOCK_RUNNING],
-            State.MOCK_RUNNING: [State.MOCK_PASSED, State.MOCK_RUNNING],  # Can retry
+            State.ENV_BUILDING: [State.ENV_READY, State.ENV_BUILDING],  # Can retry
+            State.ENV_READY: [State.CODE_GENERATED, State.ENV_BUILDING, State.MOCK_RUNNING],  # Can rebuild or skip to mock if code exists
+            State.CODE_GENERATED: [State.MOCK_RUNNING, State.CODE_GENERATED, State.ENV_BUILDING],  # Can regenerate or rebuild
+            State.MOCK_RUNNING: [State.MOCK_PASSED, State.MOCK_RUNNING, State.CODE_GENERATED, State.ENV_BUILDING],  # Can retry, regenerate, or rebuild
             State.MOCK_PASSED: [State.TRAINING],
-            State.TRAINING: [State.TRAINING_COMPLETE],
+            State.TRAINING: [State.TRAINING_COMPLETE, State.TRAINING],  # Can retry
             State.TRAINING_COMPLETE: [State.INFERENCE_READY],
             State.INFERENCE_READY: [State.DONE],
             State.DONE: [],
@@ -49,7 +51,8 @@ class State(str, Enum):
             State.DATA_REQUIRED: "Run 'nnb data validate --path <data-path>'",
             State.DATA_VALIDATED: "Run 'nnb env build'",
             State.ENV_BUILDING: "Wait for container build to complete",
-            State.ENV_READY: "Run 'nnb mock-run'",
+            State.ENV_READY: "Run 'nnb generate' to generate training code",
+            State.CODE_GENERATED: "Run 'nnb mock-run' to validate generated code",
             State.MOCK_RUNNING: "Wait for mock run to complete",
             State.MOCK_PASSED: "Run 'nnb train'",
             State.TRAINING: "Wait for training or run 'nnb attach'",

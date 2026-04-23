@@ -49,3 +49,27 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*~
+test_output.txt
+build_output.txt
+package-lock.json
+
+# Development notes (keep in docs/development/)
+*-SUMMARY.md
+*-STATUS.md
+*-IMPLEMENTATION.md
+!docs/development/*-SUMMARY.md
+!docs/development/*-IMPLEMENTATION.md
+
+# Model weights (too large for git)
+*.pth
+
+# Gemini/Antigravity local data
+.gemini/
+
+# Ensure examples are always tracked
+!examples/

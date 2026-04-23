@@ -138,8 +138,17 @@ def build_environment(project: "Project") -> None:  # noqa: F821
                 raise
         
         console.print("\n[green]✓ Environment ready![/green]")
+        
+        # Run health check
+        console.print("\n🏥 Running container health check...")
+        health_passed = _run_health_check(client, image_tag, project)
+        
+        if not health_passed:
+            console.print("\n[red]❌ Health check failed. Fix the issues above and run: nnb env build[/red]")
+            raise RuntimeError("Container health check failed")
+        
         console.print("\n💡 Next steps:")
-        console.print("  • Run mock training: [cyan]nnb mock-run[/cyan]")
+        console.print("  • Generate code: [cyan]nnb generate[/cyan]")
         console.print("  • Open shell: [cyan]nnb env shell[/cyan]")
         
     except docker.errors.DockerException as e:
@@ -151,3 +160,83 @@ def build_environment(project: "Project") -> None:  # noqa: F821
     except Exception as e:
         logger.error(f"Environment build failed: {e}", exc_info=True)
         raise
+
+
+def _run_health_check(
+    client: docker.DockerClient,
+    image_tag: str,
+    project: "Project",  # noqa: F821
+) -> bool:
+    """Run health check on freshly built container."""
+    
+    spec = project._spec
+    
+    # Framework-specific import check (use string concat — no f-strings to avoid quote issues)
+    framework_checks = {
+        "pytorch": "import torch; import torchvision; print('PyTorch ' + torch.__version__)",
+        "tensorflow": "import tensorflow as tf; print('TensorFlow ' + tf.__version__)",
+        "jax": "import jax; print('JAX ' + jax.__version__)",
+        "scikit-learn": "import sklearn; print('scikit-learn ' + sklearn.__version__)",
+    }
+    
+    framework_cmd = framework_checks.get(spec.framework, "print('Unknown framework')")
+    
+    # Each check: (name, command_list)
+    # Using list form avoids all shell quoting issues
+    checks = [
+        ("Python version", ["python3", "--version"]),
+        ("Framework import", ["python3", "-c", framework_cmd]),
+        ("Workspace writable", ["/bin/bash", "-c", "touch /workspace/.health_check && rm /workspace/.health_check"]),
+        ("Data dir exists", ["ls", "/data"]),
+    ]
+    
+    # Start a temporary container
+    workspace_dir = str(project.project_dir / "workspace")
+    data_dir = str(project.project_dir / "data")
+    
+    (project.project_dir / "data").mkdir(exist_ok=True)
+    (project.project_dir / "workspace").mkdir(exist_ok=True)
+    
+    all_passed = True
+    
+    try:
+        container = client.containers.run(
+            image_tag,
+            command="sleep 30",
+            detach=True,
+            remove=True,
+            volumes={
+                data_dir: {"bind": "/data", "mode": "ro"},
+                workspace_dir: {"bind": "/workspace", "mode": "rw"},
+            },
+        )
+        
+        for check_name, cmd in checks:
+            try:
+                result = container.exec_run(cmd)
+                if result.exit_code == 0:
+                    output = result.output.decode().strip()
+                    console.print(f"  [green]✓[/green] {check_name}: {output}")
+                else:
+                    error = result.output.decode().strip()
+                    console.print(f"  [red]✗[/red] {check_name}: {error}")
+                    all_passed = False
+            except Exception as e:
+                console.print(f"  [red]✗[/red] {check_name}: {e}")
+                all_passed = False
+        
+        # Clean up
+        try:
+            container.stop(timeout=2)
+        except Exception:
+            pass
+        
+    except Exception as e:
+        logger.error(f"Health check container failed: {e}", exc_info=True)
+        console.print(f"  [red]✗[/red] Could not start health check container: {e}")
+        all_passed = False
+    
+    if all_passed:
+        console.print("\n[green]✓ All health checks passed[/green]")
+    
+    return all_passed

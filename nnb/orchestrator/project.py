@@ -136,6 +136,8 @@ class Project:
         elif self._state == State.DATA_VALIDATED:
             print("💡 Run: nnb env build")
         elif self._state == State.ENV_READY:
+            print("💡 Run: nnb generate")
+        elif self._state == State.CODE_GENERATED:
             print("💡 Run: nnb mock-run")
         elif self._state == State.MOCK_PASSED:
             print("💡 Run: nnb train")
@@ -185,12 +187,29 @@ class Project:
         """Stage 5: Build Docker environment."""
         from nnb.stages.stage_05_environment import build_environment
         
-        if self._state != State.DATA_VALIDATED:
+        # Allow rebuild from any post-validation state (recovery path)
+        allowed_states = [
+            State.DATA_VALIDATED, State.ENV_BUILDING, State.ENV_READY,
+            State.CODE_GENERATED, State.MOCK_RUNNING,
+        ]
+        if self._state not in allowed_states:
             raise InvalidStateTransitionError(self._state, State.ENV_BUILDING)
         
         self.transition_to(State.ENV_BUILDING)
         build_environment(self)
         self.transition_to(State.ENV_READY)
+    
+    def generate_code(self) -> None:
+        """Stage 6a: Generate training code."""
+        from nnb.stages.stage_06_code_generation import generate_code
+        
+        # Allow re-generation from ENV_READY, CODE_GENERATED (re-run), or MOCK_RUNNING (recovery)
+        allowed_states = [State.ENV_READY, State.CODE_GENERATED, State.MOCK_RUNNING]
+        if self._state not in allowed_states:
+            raise InvalidStateTransitionError(self._state, State.CODE_GENERATED)
+        
+        generate_code(self)
+        self.transition_to(State.CODE_GENERATED)
     
     def open_shell(self) -> None:
         """Open shell in Docker container."""
@@ -206,10 +225,17 @@ class Project:
         container.open_shell(workspace_dir=workspace_dir, data_dir=data_dir)
     
     def run_mock(self) -> MockRunResult:
-        """Stage 6: Run mock training."""
+        """Stage 6b: Run mock training."""
         from nnb.stages.stage_06_code_generation import run_mock_training
         
-        if self._state != State.ENV_READY and self._state != State.MOCK_RUNNING:
+        # Accept ENV_READY if generated code already exists (recovery after env rebuild)
+        allowed_states = [State.CODE_GENERATED, State.MOCK_RUNNING]
+        if self._state == State.ENV_READY:
+            train_file = self.project_dir / "workspace" / "train.py"
+            if train_file.exists():
+                allowed_states.append(State.ENV_READY)
+        
+        if self._state not in allowed_states:
             raise InvalidStateTransitionError(self._state, State.MOCK_RUNNING)
         
         self.transition_to(State.MOCK_RUNNING)
@@ -224,17 +250,21 @@ class Project:
         """Stage 7: Start training."""
         from nnb.stages.stage_07_training import start_training
         
-        if self._state != State.MOCK_PASSED:
+        # Allow starting from MOCK_PASSED or re-running from TRAINING
+        allowed = [State.MOCK_PASSED, State.TRAINING]
+        if self._state not in allowed:
             raise InvalidStateTransitionError(self._state, State.TRAINING)
         
         self.transition_to(State.TRAINING)
         start_training(self)
+        # If start_training returns without error, training completed
+        self.transition_to(State.TRAINING_COMPLETE)
     
     def attach_to_training(self) -> None:
         """Attach to running training."""
         from nnb.stages.stage_07_training import attach_to_training
         
         if self._state != State.TRAINING:
-            raise ValueError("No training in progress")
+            raise ValueError("No training in progress. Run 'nnb train' first.")
         
         attach_to_training(self)

@@ -1,0 +1,18 @@
+{
+  "project_id": "nnb-20260423-091628-af157ba1",
+  "state": "TRAINING_COMPLETE",
+  "spec": {
+    "project_type": "vision",
+    "framework": "pytorch",
+    "task": "classification",
+    "dataset_source": "MNIST",
+    "num_classes": null,
+    "input_shape": null,
+    "output_shape": null,
+    "pretrained": false,
+    "export_format": null,
+    "compute_budget": "medium",
+    "latency_priority": "balanced",
+    "additional_requirements": {}
+  }
+}

@@ -1,0 +1,12 @@
+additional_requirements: {}
+compute_budget: medium
+dataset_source: MNIST
+export_format: null
+framework: pytorch
+input_shape: null
+latency_priority: balanced
+num_classes: null
+output_shape: null
+pretrained: false
+project_type: vision
+task: classification

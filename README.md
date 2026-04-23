@@ -135,12 +135,17 @@ The tool guides you through 9 stages:
 
 ## Documentation
 
+- [Quick Start Guide](QUICKSTART.md) - Get started in 5 minutes
+- [Run Me First](RUN-ME-FIRST.md) - Simplest setup guide
+- [API Key Setup](docs/API-KEY-SETUP.md) - Detailed API key configuration
+- [Security Guide](docs/SECURITY.md) - Security best practices
+
+### Architecture & Development
+
 - [Architecture](.kiro/steering/architecture.md) - System design and principles
 - [Critical Rules](.kiro/steering/CRITICAL-RULES.md) - **Must-follow rules (highest priority)**
 - [Stage Workflow](.kiro/steering/stage-workflow.md) - Detailed stage descriptions
-- [Docker Patterns](.kiro/steering/docker-patterns.md) - Container management
-- [Coding Style](.kiro/steering/coding-style.md) - Code quality standards
-- [Quick Reference](.kiro/QUICK-REFERENCE.md) - Common patterns and commands
+- [Development Docs](docs/development/) - Implementation notes and guides
 
 ### Steering Documents
 
@@ -153,8 +158,6 @@ The project uses **steering documents** to ensure consistent, high-quality code 
 - **security.md** - Security best practices
 - **error-handling.md** - Error handling patterns
 - **testing.md** - Testing requirements
-
-See [Steering Reinforcement Summary](STEERING-REINFORCEMENT-SUMMARY.md) for details.
 
 ## Development
 

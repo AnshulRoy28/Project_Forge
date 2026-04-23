@@ -231,6 +231,87 @@ def env_shell(project_id: Optional[str]) -> None:
         sys.exit(1)
 
 
+@main.command("generate")
+@click.option("--project-id", help="Project ID (uses current directory if not specified)")
+@click.option("--from", "from_path", help="Copy code from a previous session (e.g. .nnb/nnb-xxx)")
+def generate(project_id: Optional[str], from_path: Optional[str]) -> None:
+    """Generate training code using Gemini, or copy from a previous session."""
+    try:
+        if project_id:
+            project = Project.load(project_id)
+        else:
+            project = Project.load_from_current_dir()
+        
+        if from_path:
+            _copy_from_session(project, from_path)
+        else:
+            project.generate_code()
+        
+    except KeyboardInterrupt:
+        console.print("\n⚠️  Code generation interrupted")
+        sys.exit(0)
+    except Exception as e:
+        console.print(f"[red]❌ Error: {e}[/red]")
+        sys.exit(1)
+
+
+def _copy_from_session(project: "Project", from_path: str) -> None:
+    """Copy workspace files from a previous session into the current project."""
+    import shutil
+    from pathlib import Path
+    
+    source = Path(from_path)
+    
+    # Handle relative paths 
+    if not source.is_absolute():
+        source = Path.cwd() / source
+    
+    # Check if it's a project dir or workspace dir
+    source_workspace = source / "workspace" if (source / "workspace").exists() else source
+    
+    if not source_workspace.exists():
+        console.print(f"[red]❌ Source path not found: {source}[/red]")
+        console.print("💡 Expected a path like: .nnb/nnb-20260423-091628-af157ba1")
+        raise FileNotFoundError(f"Source path not found: {source}")
+    
+    # Check for expected files
+    expected = ["train.py", "model.py", "dataset.py"]
+    found = [f for f in expected if (source_workspace / f).exists()]
+    
+    if not found:
+        console.print(f"[red]❌ No training files found in {source_workspace}[/red]")
+        raise FileNotFoundError("No training files in source workspace")
+    
+    # Copy files
+    dest_workspace = project.project_dir / "workspace"
+    dest_workspace.mkdir(exist_ok=True)
+    
+    console.print(f"\n📂 Copying from: [cyan]{source_workspace}[/cyan]\n")
+    
+    copied = 0
+    for item in source_workspace.iterdir():
+        if item.is_file() and not item.name.startswith('.'):
+            dest = dest_workspace / item.name
+            shutil.copy2(item, dest)
+            console.print(f"  [green]✓[/green] {item.name}")
+            copied += 1
+    
+    console.print(f"\n✅ Copied {copied} files from previous session")
+    
+    # Also copy imp_points.md if it exists in the source project root
+    source_imp = source / "imp_points.md"
+    if source_imp.exists() and source != source_workspace:
+        dest_imp = project.project_dir / "imp_points.md"
+        if not dest_imp.exists():
+            shutil.copy2(source_imp, dest_imp)
+            console.print("  [green]✓[/green] imp_points.md (key decisions)")
+    
+    # Transition state
+    from nnb.orchestrator.state import State
+    project.transition_to(State.CODE_GENERATED)
+    console.print("\n💡 Next step: [cyan]nnb mock-run[/cyan]")
+
+
 @main.command("mock-run")
 @click.option("--project-id", help="Project ID (uses current directory if not specified)")
 def mock_run(project_id: Optional[str]) -> None:
@@ -265,9 +346,12 @@ def train(project_id: Optional[str]) -> None:
         else:
             project = Project.load_from_current_dir()
         
-        console.print("🚀 Starting training...")
         project.start_training()
         
+    except KeyboardInterrupt:
+        console.print("\n⚠️  Detached from training (it continues in background)")
+        console.print("💡 Reattach: [cyan]nnb attach[/cyan]")
+        sys.exit(0)
     except Exception as e:
         console.print(f"[red]❌ Error: {e}[/red]")
         sys.exit(1)
@@ -306,7 +390,7 @@ def config_setup() -> None:
         console.print("\n⚠️  Setup cancelled")
         sys.exit(0)
     except Exception as e:
-        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
+        console.print(f"[red]❌ Error: {e}[/red]")
         sys.exit(1)
 
 

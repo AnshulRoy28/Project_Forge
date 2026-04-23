@@ -1,0 +1,4 @@
+User Description:
+i want to build a very basic neural network that uses the mnist dataset off pytorch for a feed forward neural netowrk 
+for simple digit classification
+

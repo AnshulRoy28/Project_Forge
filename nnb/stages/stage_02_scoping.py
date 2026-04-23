@@ -52,6 +52,69 @@ Output format (JSON):
 }}
 """
 
+IMP_POINTS_PROMPT = """
+You are an expert ML engineer summarizing key architectural and implementation decisions.
+
+The user described their project:
+{user_description}
+
+Confirmed specification:
+{spec}
+
+Scoping Q&A:
+{qa_summary}
+
+Generate a structured "Important Points" document that captures ALL key decisions
+that downstream code generation will need to reference. This document is the
+single source of truth for:
+
+1. **Architecture** — Model architecture choice and why (e.g., ResNet-18, simple CNN, LSTM)
+2. **Dataset** — Source (torchvision/custom), name, path, format, preprocessing needed
+3. **Training Strategy** — Optimizer, learning rate schedule, batch size, epochs, loss function
+4. **Input/Output** — Exact shapes, data types, normalization
+5. **Compute** — GPU/CPU preference, memory constraints, mixed precision
+6. **Export** — Target format if any (ONNX, TFLite, etc.)
+7. **Key Constraints** — Anything unusual the user mentioned
+8. **Checkpointing** — Frequency, what to save
+
+Format as clean Markdown with headers and bullet points. Be specific and actionable —
+this document will be directly referenced during code generation.
+
+Output ONLY the Markdown content, no code fences.
+"""
+
+
+def _generate_imp_points(
+    project: "Project",  # noqa: F821
+    gemini: "GeminiClient",  # noqa: F821
+    user_description: str,
+    spec_data: dict,
+    answers: dict,
+) -> None:
+    """Generate imp_points.md — key decisions for downstream stages."""
+    
+    spec_str = "\n".join(f"- {k}: {v}" for k, v in spec_data.items())
+    qa_str = "\n".join(f"- **{topic}**: {answer}" for topic, answer in answers.items())
+    
+    prompt = IMP_POINTS_PROMPT.format(
+        user_description=user_description,
+        spec=spec_str,
+        qa_summary=qa_str,
+    )
+    
+    try:
+        imp_points = gemini.generate(prompt, temperature=0.3)
+        
+        imp_file = project.project_dir / "imp_points.md"
+        imp_file.write_text(imp_points, encoding="utf-8")
+        
+        logger.info(f"Generated imp_points.md ({len(imp_points)} chars)")
+        console.print("[green]✓ Key decisions saved to imp_points.md[/green]")
+        
+    except Exception as e:
+        logger.warning(f"Failed to generate imp_points.md: {e}")
+        console.print("[yellow]⚠️  Could not generate decisions summary, continuing...[/yellow]")
+
 
 def ask_scoping_questions(project: "Project", user_description: str) -> None:  # noqa: F821
     """Ask targeted scoping questions."""
@@ -131,6 +194,10 @@ def ask_scoping_questions(project: "Project", user_description: str) -> None:  #
         # Save to YAML
         with open(project.spec_file, "w") as f:
             yaml.dump(spec.dict(), f, default_flow_style=False)
+        
+        # Generate imp_points.md — key decisions for downstream stages
+        console.print("\n📝 Generating key decisions summary...")
+        _generate_imp_points(project, gemini, user_description, spec_data, answers)
         
         # Transition state
         project.transition_to(State.SPEC_CONFIRMED)
