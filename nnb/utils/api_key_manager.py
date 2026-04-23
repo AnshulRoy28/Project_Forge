@@ -139,8 +139,7 @@ def setup_api_key_interactive() -> bool:
     
     if APIKeyManager.set_api_key(api_key):
         console.print("[green]✓ API key stored successfully![/green]")
-        console.print("\n[dim]Your key is now stored in your system keyring.")
-        console.print("You can delete it anytime with: nnb config delete-key[/dim]\n")
+        console.print("\n[dim]Your key is now stored in your system keyring.\nYou can delete it anytime with: nnb config delete-key[/dim]\n")
         return True
     else:
         console.print("[red]❌ Failed to store API key[/red]")
