@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-MNIST Digit Inference — Draw & Predict
+MNIST Digit Inference Server
 
-A Paint-like canvas where you draw a digit and the trained model predicts it.
-Uses the model from .nnb/nnb-20260423-091628-af157ba1/workspace/checkpoints/best_model.pth
+A web-based Paint canvas where you draw a digit and the model predicts it.
+Runs inside Docker — zero local dependencies needed.
 
 Usage:
-    python inference.py
+    python inference.py [--port 8080] [--model PATH]
 """
 
-import tkinter as tk
-from tkinter import font as tkfont
+import io
+import json
+import base64
+import argparse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
 import torch
 import torch.nn as nn
+from PIL import Image
 
 
 # =============================================================================
-# MODEL (must match training architecture exactly)
+# MODEL (matches training architecture: 784 → 48 → 10)
 # =============================================================================
 
 class FeedForwardNN(nn.Module):
-    """Feedforward NN matching the trained model: 784 → 48 → 10."""
-
     def __init__(self, input_size=784, hidden_size=48, num_classes=10):
         super().__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
@@ -37,234 +39,490 @@ class FeedForwardNN(nn.Module):
 
 
 # =============================================================================
-# APP
+# HTML PAGE (embedded — no external files needed)
 # =============================================================================
 
-CHECKPOINT = ".nnb/nnb-20260423-091628-af157ba1/workspace/checkpoints/best_model.pth"
-CANVAS_SIZE = 280          # Drawing canvas (pixels)
-MODEL_INPUT = 28           # MNIST resolution
-BRUSH_RADIUS = 10          # Brush thickness
+HTML_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MNIST Digit Recognizer</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: #0a0a1a;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  /* Animated background */
+  body::before {
+    content: '';
+    position: fixed;
+    top: -50%; left: -50%;
+    width: 200%; height: 200%;
+    background: radial-gradient(ellipse at 30% 20%, rgba(233,69,96,0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 70% 80%, rgba(83,52,131,0.08) 0%, transparent 50%);
+    animation: drift 20s ease-in-out infinite alternate;
+    z-index: 0;
+    pointer-events: none;
+  }
+  @keyframes drift {
+    0%   { transform: translate(0, 0) rotate(0deg); }
+    100% { transform: translate(-5%, 3%) rotate(3deg); }
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+  }
+
+  h1 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #e94560, #533483);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: -0.02em;
+  }
+  .subtitle {
+    color: #666;
+    font-size: 0.85rem;
+    margin-top: -12px;
+  }
+
+  .main {
+    display: flex;
+    gap: 24px;
+    align-items: stretch;
+  }
+
+  /* Canvas */
+  .canvas-wrap {
+    border-radius: 16px;
+    padding: 3px;
+    background: linear-gradient(135deg, #e94560, #533483);
+    box-shadow: 0 0 40px rgba(233,69,96,0.15);
+    transition: box-shadow 0.3s;
+  }
+  .canvas-wrap:hover {
+    box-shadow: 0 0 60px rgba(233,69,96,0.25);
+  }
+
+  canvas {
+    display: block;
+    border-radius: 14px;
+    cursor: crosshair;
+    background: #000;
+    touch-action: none;
+  }
+
+  /* Prediction panel */
+  .panel {
+    background: rgba(22,33,62,0.6);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 16px;
+    padding: 24px 20px;
+    width: 220px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .panel-title {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #666;
+    margin-bottom: 4px;
+  }
+
+  .prediction {
+    font-size: 5rem;
+    font-weight: 700;
+    color: #e94560;
+    line-height: 1;
+    transition: transform 0.15s, color 0.3s;
+  }
+  .prediction.pop {
+    transform: scale(1.15);
+  }
+
+  .confidence {
+    font-size: 0.9rem;
+    color: #888;
+    margin-bottom: 20px;
+  }
+
+  /* Probability bars */
+  .bars {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .bar-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .bar-digit {
+    width: 16px;
+    font-size: 0.75rem;
+    color: #888;
+    text-align: right;
+    font-family: 'Consolas', monospace;
+  }
+  .bar-track {
+    flex: 1;
+    height: 10px;
+    background: rgba(15,52,96,0.6);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 5px;
+    width: 0%;
+    transition: width 0.3s ease, background 0.3s;
+    background: #533483;
+  }
+  .bar-fill.active {
+    background: linear-gradient(90deg, #e94560, #ff6b81);
+  }
+  .bar-pct {
+    width: 36px;
+    font-size: 0.7rem;
+    color: #555;
+    font-family: 'Consolas', monospace;
+  }
+  .bar-pct.active { color: #e94560; }
+
+  /* Clear button */
+  .clear-btn {
+    margin-top: 8px;
+    padding: 10px 32px;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: white;
+    background: linear-gradient(135deg, #e94560, #c0392b);
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.3s;
+  }
+  .clear-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(233,69,96,0.3);
+  }
+  .clear-btn:active { transform: translateY(0); }
+
+  .hint {
+    font-size: 0.75rem;
+    color: #444;
+    margin-top: -8px;
+  }
+
+  @media (max-width: 640px) {
+    .main { flex-direction: column; align-items: center; }
+    .panel { width: 280px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>✏️ MNIST Digit Recognizer</h1>
+  <p class="subtitle">Draw a digit on the canvas — the model predicts in real-time</p>
+
+  <div class="main">
+    <div class="canvas-wrap">
+      <canvas id="canvas" width="280" height="280"></canvas>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Prediction</div>
+      <div class="prediction" id="pred">—</div>
+      <div class="confidence" id="conf">Draw something!</div>
+
+      <div class="bars" id="bars"></div>
+    </div>
+  </div>
+
+  <button class="clear-btn" onclick="clearCanvas()">🗑️ Clear Canvas</button>
+  <p class="hint">Model: FeedForwardNN (784→48→10) · 97.2% accuracy</p>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const predEl = document.getElementById('pred');
+const confEl = document.getElementById('conf');
+const barsEl = document.getElementById('bars');
+
+let drawing = false;
+let debounceTimer = null;
+
+// Build bar rows
+for (let i = 0; i < 10; i++) {
+  barsEl.innerHTML += `
+    <div class="bar-row">
+      <span class="bar-digit">${i}</span>
+      <div class="bar-track"><div class="bar-fill" id="bf${i}"></div></div>
+      <span class="bar-pct" id="bp${i}"></span>
+    </div>`;
+}
+
+// Drawing
+ctx.lineCap = 'round';
+ctx.lineJoin = 'round';
+ctx.lineWidth = 18;
+ctx.strokeStyle = 'white';
+
+function startDraw(e) {
+  drawing = true;
+  const p = pos(e);
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y);
+  // Draw a dot on click
+  ctx.lineTo(p.x + 0.1, p.y + 0.1);
+  ctx.stroke();
+}
+
+function draw(e) {
+  if (!drawing) return;
+  e.preventDefault();
+  const p = pos(e);
+  ctx.lineTo(p.x, p.y);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y);
+}
+
+function endDraw() {
+  if (!drawing) return;
+  drawing = false;
+  ctx.beginPath();
+  // Debounce prediction
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(predict, 150);
+}
+
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: t.clientX - r.left, y: t.clientY - r.top };
+}
+
+// Mouse
+canvas.addEventListener('mousedown', startDraw);
+canvas.addEventListener('mousemove', draw);
+canvas.addEventListener('mouseup', endDraw);
+canvas.addEventListener('mouseleave', endDraw);
+
+// Touch
+canvas.addEventListener('touchstart', (e) => { e.preventDefault(); startDraw(e); });
+canvas.addEventListener('touchmove', (e) => { e.preventDefault(); draw(e); });
+canvas.addEventListener('touchend', endDraw);
+
+function clearCanvas() {
+  ctx.clearRect(0, 0, 280, 280);
+  predEl.textContent = '—';
+  predEl.style.color = '#e94560';
+  confEl.textContent = 'Draw something!';
+  for (let i = 0; i < 10; i++) {
+    document.getElementById('bf' + i).style.width = '0%';
+    document.getElementById('bf' + i).className = 'bar-fill';
+    document.getElementById('bp' + i).textContent = '';
+    document.getElementById('bp' + i).className = 'bar-pct';
+  }
+}
+
+async function predict() {
+  // Check if canvas is blank
+  const pixels = ctx.getImageData(0, 0, 280, 280).data;
+  let hasContent = false;
+  for (let i = 3; i < pixels.length; i += 4) {
+    if (pixels[i] > 10) { hasContent = true; break; }
+  }
+  if (!hasContent) return;
+
+  // Send canvas as PNG
+  const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+  const form = new FormData();
+  form.append('image', blob);
+
+  try {
+    const res = await fetch('/predict', { method: 'POST', body: form });
+    const data = await res.json();
+
+    // Animate prediction
+    predEl.textContent = data.prediction;
+    predEl.classList.add('pop');
+    setTimeout(() => predEl.classList.remove('pop'), 150);
+
+    confEl.textContent = (data.confidence * 100).toFixed(1) + '% confidence';
+
+    // Update bars
+    const maxP = Math.max(...data.probabilities);
+    for (let i = 0; i < 10; i++) {
+      const p = data.probabilities[i];
+      const fill = document.getElementById('bf' + i);
+      const pct = document.getElementById('bp' + i);
+      fill.style.width = (p / maxP * 100).toFixed(1) + '%';
+      fill.className = i === data.prediction ? 'bar-fill active' : 'bar-fill';
+      pct.textContent = (p * 100).toFixed(0) + '%';
+      pct.className = i === data.prediction ? 'bar-pct active' : 'bar-pct';
+    }
+  } catch (err) {
+    confEl.textContent = 'Server error';
+  }
+}
+</script>
+</body>
+</html>
+"""
+
+
+# =============================================================================
+# HTTP SERVER
+# =============================================================================
+
 MNIST_MEAN = 0.1307
 MNIST_STD = 0.3081
 
+model = None  # loaded at startup
 
-class DigitRecognizer:
-    """Tkinter app with a drawing canvas and live prediction."""
 
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title("MNIST Digit Recognizer")
-        self.root.resizable(False, False)
-        self.root.configure(bg="#1a1a2e")
+def preprocess_image(image_bytes: bytes) -> torch.Tensor:
+    """Convert drawn canvas PNG to a normalized 784-dim tensor."""
+    img = Image.open(io.BytesIO(image_bytes)).convert("L")
+    img = img.resize((28, 28), Image.LANCZOS)
+    arr = np.array(img, dtype=np.float32) / 255.0
+    arr = (arr - MNIST_MEAN) / MNIST_STD
+    return torch.tensor(arr).view(1, -1)
 
-        # Load model
-        self.model = self._load_model()
 
-        # Off-screen image for pixel-accurate capture
-        self.pil_image = Image.new("L", (CANVAS_SIZE, CANVAS_SIZE), 0)
-        self.pil_draw = ImageDraw.Draw(self.pil_image)
+class Handler(BaseHTTPRequestHandler):
+    """Serves the HTML page and handles /predict POST requests."""
 
-        self._build_ui()
-        self._bind_events()
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(HTML_PAGE.encode("utf-8"))
 
-    # ── Model ────────────────────────────────────────────────────────────
+    def do_POST(self):
+        if self.path != "/predict":
+            self.send_error(404)
+            return
 
-    def _load_model(self) -> FeedForwardNN:
-        model = FeedForwardNN()
-        ckpt = torch.load(CHECKPOINT, map_location="cpu", weights_only=True)
-        model.load_state_dict(ckpt["model_state_dict"])
-        model.eval()
-        return model
+        # Parse multipart form data (image field)
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length)
 
-    # ── UI ───────────────────────────────────────────────────────────────
+        # Extract image bytes from multipart form
+        image_bytes = self._extract_image(body)
+        if image_bytes is None:
+            self.send_error(400, "No image data")
+            return
 
-    def _build_ui(self):
-        # Fonts
-        title_font = tkfont.Font(family="Segoe UI", size=16, weight="bold")
-        pred_font = tkfont.Font(family="Segoe UI", size=72, weight="bold")
-        conf_font = tkfont.Font(family="Segoe UI", size=14)
-        hint_font = tkfont.Font(family="Segoe UI", size=10)
-        bar_label_font = tkfont.Font(family="Consolas", size=10)
-
-        bg = "#1a1a2e"
-        fg = "#e0e0e0"
-        accent = "#e94560"
-
-        # ── Title ──
-        tk.Label(
-            self.root, text="✏️  Draw a Digit", font=title_font,
-            bg=bg, fg=fg
-        ).pack(pady=(16, 4))
-
-        tk.Label(
-            self.root, text="Draw on the canvas below, then see the prediction →",
-            font=hint_font, bg=bg, fg="#888"
-        ).pack()
-
-        # ── Main frame (canvas + prediction) ──
-        main = tk.Frame(self.root, bg=bg)
-        main.pack(padx=20, pady=12)
-
-        # Canvas
-        canvas_frame = tk.Frame(main, bg=accent, bd=0, highlightthickness=2,
-                                highlightbackground=accent)
-        canvas_frame.pack(side=tk.LEFT)
-
-        self.canvas = tk.Canvas(
-            canvas_frame, width=CANVAS_SIZE, height=CANVAS_SIZE,
-            bg="black", cursor="crosshair", highlightthickness=0
-        )
-        self.canvas.pack()
-
-        # Prediction panel
-        pred_panel = tk.Frame(main, bg="#16213e", width=220)
-        pred_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(16, 0))
-        pred_panel.pack_propagate(False)
-
-        tk.Label(
-            pred_panel, text="Prediction", font=conf_font,
-            bg="#16213e", fg="#888"
-        ).pack(pady=(20, 0))
-
-        self.pred_label = tk.Label(
-            pred_panel, text="—", font=pred_font,
-            bg="#16213e", fg=accent
-        )
-        self.pred_label.pack(pady=(0, 4))
-
-        self.conf_label = tk.Label(
-            pred_panel, text="Draw something!", font=conf_font,
-            bg="#16213e", fg="#888"
-        )
-        self.conf_label.pack()
-
-        # ── Probability bars ──
-        bars_frame = tk.Frame(pred_panel, bg="#16213e")
-        bars_frame.pack(fill=tk.X, padx=14, pady=(16, 10))
-
-        self.bar_canvases = []
-        self.bar_labels = []
-
-        for i in range(10):
-            row = tk.Frame(bars_frame, bg="#16213e")
-            row.pack(fill=tk.X, pady=1)
-
-            lbl = tk.Label(row, text=str(i), font=bar_label_font,
-                           bg="#16213e", fg="#aaa", width=2, anchor="e")
-            lbl.pack(side=tk.LEFT)
-
-            bar_cv = tk.Canvas(row, height=12, bg="#0f3460",
-                               highlightthickness=0)
-            bar_cv.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
-
-            pct_lbl = tk.Label(row, text="", font=bar_label_font,
-                               bg="#16213e", fg="#666", width=5, anchor="w")
-            pct_lbl.pack(side=tk.LEFT, padx=(4, 0))
-
-            self.bar_canvases.append(bar_cv)
-            self.bar_labels.append(pct_lbl)
-
-        # ── Clear button ──
-        btn_frame = tk.Frame(self.root, bg=bg)
-        btn_frame.pack(pady=(0, 16))
-
-        self.clear_btn = tk.Button(
-            btn_frame, text="🗑️  Clear Canvas", font=conf_font,
-            bg=accent, fg="white", activebackground="#c0392b",
-            activeforeground="white", bd=0, padx=24, pady=8,
-            cursor="hand2", command=self._clear
-        )
-        self.clear_btn.pack()
-
-    # ── Events ───────────────────────────────────────────────────────────
-
-    def _bind_events(self):
-        self.canvas.bind("<B1-Motion>", self._paint)
-        self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        # Also draw on click (not just drag)
-        self.canvas.bind("<Button-1>", self._paint)
-
-    def _paint(self, event):
-        r = BRUSH_RADIUS
-        x, y = event.x, event.y
-        self.canvas.create_oval(
-            x - r, y - r, x + r, y + r,
-            fill="white", outline="white"
-        )
-        self.pil_draw.ellipse(
-            [x - r, y - r, x + r, y + r],
-            fill=255
-        )
-
-    def _on_release(self, _event):
-        self._predict()
-
-    def _clear(self):
-        self.canvas.delete("all")
-        self.pil_image = Image.new("L", (CANVAS_SIZE, CANVAS_SIZE), 0)
-        self.pil_draw = ImageDraw.Draw(self.pil_image)
-        self.pred_label.config(text="—")
-        self.conf_label.config(text="Draw something!")
-        for i in range(10):
-            self.bar_canvases[i].delete("all")
-            self.bar_labels[i].config(text="")
-
-    # ── Prediction ───────────────────────────────────────────────────────
-
-    def _predict(self):
-        # Preprocess: resize to 28×28, center, normalize like MNIST training
-        img = self.pil_image.copy()
-
-        # Add slight Gaussian blur (mimics antialiasing of real MNIST)
-        img = img.filter(ImageFilter.GaussianBlur(radius=1))
-
-        # Resize to 28×28 with antialiasing
-        img = img.resize((MODEL_INPUT, MODEL_INPUT), Image.LANCZOS)
-
-        # Convert to tensor and normalize (same as training)
-        arr = np.array(img, dtype=np.float32) / 255.0
-        arr = (arr - MNIST_MEAN) / MNIST_STD
-        tensor = torch.tensor(arr).view(1, -1)  # (1, 784)
-
-        # Infer
+        # Predict
+        tensor = preprocess_image(image_bytes)
         with torch.no_grad():
-            logits = self.model(tensor)
+            logits = model(tensor)
             probs = torch.softmax(logits, dim=1).squeeze()
 
-        predicted = probs.argmax().item()
-        confidence = probs[predicted].item()
+        predicted = int(probs.argmax().item())
+        confidence = float(probs[predicted].item())
 
-        # Update UI
-        self.pred_label.config(text=str(predicted))
-        self.conf_label.config(text=f"{confidence:.1%} confidence")
+        result = {
+            "prediction": predicted,
+            "confidence": confidence,
+            "probabilities": [round(float(p), 4) for p in probs],
+        }
 
-        # Update probability bars
-        max_prob = probs.max().item()
-        accent = "#e94560"
-        dim = "#0f3460"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(result).encode())
 
-        for i in range(10):
-            p = probs[i].item()
-            cv = self.bar_canvases[i]
-            cv.delete("all")
-            cv.update_idletasks()
-            w = cv.winfo_width()
+    def _extract_image(self, body: bytes) -> bytes | None:
+        """Extract image bytes from multipart/form-data body."""
+        # Find the boundary from Content-Type header
+        content_type = self.headers.get("Content-Type", "")
+        if "boundary=" not in content_type:
+            return None
 
-            bar_w = int(w * p / max(max_prob, 0.01))
-            color = accent if i == predicted else "#533483"
-            cv.create_rectangle(0, 0, bar_w, 12, fill=color, outline="")
+        boundary = content_type.split("boundary=")[1].strip()
+        # Handle quoted boundary
+        if boundary.startswith('"') and boundary.endswith('"'):
+            boundary = boundary[1:-1]
 
-            self.bar_labels[i].config(
-                text=f"{p:.0%}",
-                fg=accent if i == predicted else "#666"
-            )
+        parts = body.split(f"--{boundary}".encode())
+        for part in parts:
+            if b"image" in part and b"\r\n\r\n" in part:
+                return part.split(b"\r\n\r\n", 1)[1].rstrip(b"\r\n--")
+        return None
+
+    def log_message(self, format, *args):
+        """Suppress default request logging (too noisy)."""
+        pass
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
 
+def main():
+    global model
+
+    parser = argparse.ArgumentParser(description="MNIST Digit Inference Server")
+    parser.add_argument("--port", type=int, default=8080, help="Server port (default: 8080)")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="/workspace/checkpoints/best_model.pth",
+        help="Path to model checkpoint",
+    )
+    args = parser.parse_args()
+
+    # Load model
+    print(f"Loading model from {args.model} ...")
+    m = FeedForwardNN()
+    ckpt = torch.load(args.model, map_location="cpu", weights_only=True)
+    m.load_state_dict(ckpt["model_state_dict"])
+    m.eval()
+    model = m
+    print(f"Model loaded (best accuracy: {ckpt.get('best_accuracy', 'N/A')})")
+
+    # Start server
+    server = HTTPServer(("0.0.0.0", args.port), Handler)
+    print(f"\n{'='*50}")
+    print(f"  MNIST Inference Server running!")
+    print(f"  Open:  http://localhost:{args.port}")
+    print(f"{'='*50}\n")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        server.shutdown()
+
+
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = DigitRecognizer(root)
-    root.mainloop()
+    main()

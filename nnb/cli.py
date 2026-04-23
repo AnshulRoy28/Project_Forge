@@ -376,6 +376,108 @@ def attach(project_id: Optional[str]) -> None:
         sys.exit(1)
 
 
+@main.command("infer")
+@click.option("--project-id", help="Project ID (uses current directory if not specified)")
+@click.option("--port", default=8080, help="Port to serve on (default: 8080)")
+def infer(project_id: Optional[str], port: int) -> None:
+    """Launch inference web server (draw digits in your browser)."""
+    import shutil
+    import docker
+
+    try:
+        if project_id:
+            project = Project.load(project_id)
+        else:
+            project = Project.load_from_current_dir()
+
+        workspace = project.project_dir / "workspace"
+        checkpoint = workspace / "checkpoints" / "best_model.pth"
+
+        # Check for trained model
+        if not checkpoint.exists():
+            # Also try model.pth in workspace root
+            alt = workspace / "model.pth"
+            if alt.exists():
+                checkpoint = alt
+            else:
+                console.print("[red]❌ No trained model found[/red]")
+                console.print("💡 Run [cyan]nnb train[/cyan] first")
+                sys.exit(1)
+
+        # Copy inference.py into workspace so the container can run it
+        inference_src = Path.cwd() / "inference.py"
+        if not inference_src.exists():
+            console.print("[red]❌ inference.py not found in project root[/red]")
+            sys.exit(1)
+
+        inference_dst = workspace / "inference.py"
+        shutil.copy2(inference_src, inference_dst)
+
+        # Also install Pillow in the container (needed for image processing)
+        from nnb.docker_runtime.container import get_container
+        container = get_container(project.project_id)
+
+        data_dir = str(project.project_dir / "data")
+        workspace_dir = str(workspace)
+        (project.project_dir / "data").mkdir(exist_ok=True)
+
+        # Determine checkpoint path inside container
+        if "checkpoints" in str(checkpoint):
+            model_path = "/workspace/checkpoints/best_model.pth"
+        else:
+            model_path = "/workspace/model.pth"
+
+        console.print("\n[bold]🔮 Starting inference server...[/bold]\n")
+        console.print(f"📦 Model: [cyan]{checkpoint.name}[/cyan]")
+        console.print(f"🌐 Port: [cyan]{port}[/cyan]\n")
+
+        # Remove old container if any
+        try:
+            client = docker.from_env()
+            old = client.containers.get(f"nnb-{project.project_id}")
+            old.remove(force=True)
+        except Exception:
+            pass
+
+        # Start container with port mapping
+        client = docker.from_env()
+        image_tag = f"nnb-{project.project_id}:latest"
+
+        docker_container = client.containers.run(
+            image_tag,
+            command=f"bash -c 'pip install -q Pillow && python3 /workspace/inference.py --model {model_path} --port {port}'",
+            detach=True,
+            name=f"nnb-{project.project_id}",
+            ports={f"{port}/tcp": port},
+            volumes={
+                data_dir: {"bind": "/data", "mode": "ro"},
+                workspace_dir: {"bind": "/workspace", "mode": "rw"},
+            },
+            remove=False,
+        )
+
+        console.print(f"🐳 Container: [dim]{docker_container.id[:12]}[/dim]")
+        console.print(f"\n{'='*50}")
+        console.print(f"  ✏️  Draw digits at: [bold cyan]http://localhost:{port}[/bold cyan]")
+        console.print(f"{'='*50}")
+        console.print("\n[dim]Press Ctrl+C to stop the server[/dim]\n")
+
+        # Stream container logs
+        try:
+            for chunk in docker_container.logs(stream=True, follow=True):
+                line = chunk.decode("utf-8", errors="replace").strip()
+                if line:
+                    console.print(f"  [dim]{line}[/dim]")
+        except KeyboardInterrupt:
+            console.print("\n\n⚠️  Stopping inference server...")
+            docker_container.stop(timeout=3)
+            docker_container.remove(force=True)
+            console.print("[green]✓ Server stopped[/green]")
+
+    except Exception as e:
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
+        sys.exit(1)
+
 @main.group()
 def config() -> None:
     """Configuration management."""
