@@ -6,6 +6,7 @@ from typing import Optional
 
 import click
 from rich.console import Console
+from rich.markup import escape
 
 from nnb.orchestrator.project import Project
 from nnb.orchestrator.state import State
@@ -54,7 +55,7 @@ def start() -> None:
         console.print("\n⚠️  Interrupted. Resume with: nnb resume <project-id>")
         sys.exit(0)
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -74,7 +75,7 @@ def resume(project_id: str) -> None:
         console.print(f"[red]❌ Project '{project_id}' not found[/red]")
         sys.exit(1)
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -101,7 +102,7 @@ def status(project_id: Optional[str]) -> None:
         console.print("💡 Start a new project with: nnb start")
         sys.exit(1)
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -165,7 +166,7 @@ def data_validate(path: str, project_id: Optional[str]) -> None:
             sys.exit(1)
             
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -184,7 +185,7 @@ def data_status(project_id: Optional[str]) -> None:
         console.print(requirements)
         
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -209,7 +210,7 @@ def env_build(project_id: Optional[str]) -> None:
         console.print("[green]✓ Container built successfully[/green]")
         
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -227,7 +228,7 @@ def env_shell(project_id: Optional[str]) -> None:
         project.open_shell()
         
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -251,7 +252,7 @@ def generate(project_id: Optional[str], from_path: Optional[str]) -> None:
         console.print("\n⚠️  Code generation interrupted")
         sys.exit(0)
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -332,7 +333,7 @@ def mock_run(project_id: Optional[str]) -> None:
             sys.exit(1)
             
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -353,7 +354,7 @@ def train(project_id: Optional[str]) -> None:
         console.print("💡 Reattach: [cyan]nnb attach[/cyan]")
         sys.exit(0)
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -371,7 +372,7 @@ def attach(project_id: Optional[str]) -> None:
         project.attach_to_training()
         
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -390,7 +391,7 @@ def config_setup() -> None:
         console.print("\n⚠️  Setup cancelled")
         sys.exit(0)
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -403,7 +404,7 @@ def config_delete_key() -> None:
         console.print("\n⚠️  Cancelled")
         sys.exit(0)
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -413,7 +414,7 @@ def config_status() -> None:
     try:
         show_api_key_status()
     except Exception as e:
-        console.print(f"[red]❌ Error: {e}[/red]")
+        console.print(f"[red]❌ Error: {escape(str(e))}[/red]")
         sys.exit(1)
 
 
